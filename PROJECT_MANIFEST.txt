@@ -1,0 +1,24 @@
+Clinic Front-Desk Intelligence — Sprint 3G
+Complete project package built from Sprint 3E.
+
+Backend:
+- FastAPI / SQLAlchemy / PostgreSQL
+- Alembic migrations through 0003_waiting_list
+- Risk engine
+- Attention Queue
+- Waiting List + Cancellation Recovery
+- NEW: Operational dashboard API
+
+Frontend:
+- Next.js dashboard
+- Administration
+- Booking and appointment actions
+- Risk/history views
+- Attention Queue
+- Waiting List + recovery UI
+- NEW: Operational Dashboard UI with date range and doctor filter
+
+Explicitly deferred:
+- Sprint 3F Revenue at Risk / Revenue Recovered Intelligence
+
+Version: 3.0.0-alpha.5
