@@ -1,24 +1,32 @@
-Clinic Front-Desk Intelligence — Sprint 3G
-Complete project package built from Sprint 3E.
+Clinic Front-Desk Sprint 4.5C — Security + Deployment Gate
+Backend version: 4.5.3-pilot.1
+Alembic head: 0006_audit_logs
 
-Backend:
-- FastAPI / SQLAlchemy / PostgreSQL
-- Alembic migrations through 0003_waiting_list
-- Risk engine
-- Attention Queue
-- Waiting List + Cancellation Recovery
-- NEW: Operational dashboard API
+Inherited:
+- Sprint 1–3G clinic front-desk workflow and Operational Dashboard
+- Sprint 4.5 authentication/JWT
+- Sprint 4.5A first-run setup + OWNER/SECRETARY/DOCTOR role security
+- Sprint 4.5B backup/restore scripts + production Docker build foundation
 
-Frontend:
-- Next.js dashboard
-- Administration
-- Booking and appointment actions
-- Risk/history views
-- Attention Queue
-- Waiting List + recovery UI
-- NEW: Operational Dashboard UI with date range and doctor filter
+Sprint 4.5C additions:
+- audit_logs database table + Alembic migration 0006
+- OWNER audit-log API + dashboard UI
+- login/setup IP rate limiting
+- security headers + HSTS in production HTTPS path
+- Caddy reverse proxy with automatic HTTPS
+- production network layout that does not publish DB/backend/frontend directly
+- deployment runbook
 
-Explicitly deferred:
-- Sprint 3F Revenue at Risk / Revenue Recovered Intelligence
+Deferred by design:
+- Sprint 3F revenue intelligence
+- Sprint 4 WhatsApp/AI communication/reminders/handoff
 
-Version: 3.0.0-alpha.5
+SPRINT 4.5D ADDITIONS
+- backend version 4.5.4-pilot.1
+- GET /ready database + Alembic readiness probe
+- scripts/pilot_preflight.cmd
+- scripts/pilot_smoke_test.cmd
+- scripts/restore_drill.cmd
+- PILOT_READINESS_RUNBOOK.md
+- production backend healthcheck uses /ready
+- no database migration; Alembic head remains 0006_audit_logs

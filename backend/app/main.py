@@ -1,18 +1,28 @@
 from datetime import datetime, timedelta, date, time
-from fastapi import FastAPI, Depends, HTTPException, Query
+import os
+import time as pytime
+from collections import defaultdict, deque
+from threading import Lock
+from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, text
 from sqlalchemy.orm import Session
-from .database import get_db
-from .models import Clinic, Doctor, Service, Patient, DoctorSchedule, Appointment, AppointmentEvent, AppointmentStatus, RiskScore, WaitingListEntry
+from .database import get_db, SessionLocal
+from .models import Clinic, Doctor, Service, Patient, DoctorSchedule, Appointment, AppointmentEvent, AppointmentStatus, RiskScore, WaitingListEntry, User, UserRole, AuditLog
 from .schemas import *
 from .booking import validate_entities, ensure_in_schedule, ensure_no_overlap, calculate_end, ACTIVE
 from .risk import calculate_appointment_risk, patient_history
 from .attention import build_attention_queue
 from .recovery import recovery_candidates
+from .auth import hash_password, verify_password, make_token, decode_token
 
-app = FastAPI(title="Clinic Front-Desk Intelligence", version="3.0.0-alpha.5")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000","http://127.0.0.1:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="Clinic Front-Desk Intelligence", version="4.5.4-pilot.1")
+
+def _cors_origins():
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def event(db, appointment_id, event_type, details=None):
     db.add(AppointmentEvent(appointment_id=appointment_id, event_type=event_type, details=details))
@@ -26,14 +36,287 @@ def appointment_view(a: Appointment):
         duration_minutes=a.service.duration_minutes, price=float(a.service.price) if a.service.price is not None else None
     )
 
+
+PUBLIC_PATHS={"/health","/ready","/auth/status","/auth/setup-clinics","/auth/setup","/auth/login","/docs","/openapi.json","/redoc"}
+
+def _deny(detail="Access denied", status=403):
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail":detail}, status_code=status)
+
+def _role_value(user):
+    return user.role.value if hasattr(user.role, "value") else str(user.role)
+
+def _doctor_related_patient(db, patient_id:int, doctor_id:int)->bool:
+    return db.scalar(select(func.count(Appointment.id)).where(Appointment.patient_id==patient_id, Appointment.doctor_id==doctor_id)) > 0
+
+
+
+# Sprint 4.5C: pilot-grade abuse protection. This is intentionally simple and
+# process-local; for horizontally scaled production use Redis or an API gateway.
+_RATE_BUCKETS = defaultdict(deque)
+_RATE_LOCK = Lock()
+
+def _client_ip(request: Request) -> str:
+    trust_proxy = os.getenv("TRUST_PROXY", "false").lower() in {"1","true","yes"}
+    if trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()[:64]
+    return (request.client.host if request.client else "unknown")[:64]
+
+def _limited(key: str, limit: int, window_seconds: int) -> bool:
+    now = pytime.monotonic()
+    with _RATE_LOCK:
+        q = _RATE_BUCKETS[key]
+        while q and now - q[0] > window_seconds:
+            q.popleft()
+        if len(q) >= limit:
+            return True
+        q.append(now)
+        return False
+
+def _apply_security_headers(response, request: Request):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    if request.url.path.startswith("/auth/"):
+        response.headers["Cache-Control"] = "no-store"
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    if os.getenv("APP_ENV", "development").lower() == "production" and forwarded_proto == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+def _write_audit(request: Request, response):
+    path = request.url.path
+    user_state = getattr(request.state, "user", None)
+    public_security_action = path in {"/auth/login", "/auth/setup"} and request.method == "POST"
+    authenticated_write = bool(user_state) and request.method in {"POST","PATCH","PUT","DELETE"}
+    if not (public_security_action or authenticated_write):
+        return
+    action = ("AUTH_LOGIN" if path == "/auth/login" else "AUTH_SETUP" if path == "/auth/setup" else f"{request.method} {path}")
+    try:
+        with SessionLocal() as db:
+            db.add(AuditLog(
+                clinic_id=int(user_state["clinic_id"]) if user_state else None,
+                user_id=int(user_state["sub"]) if user_state else None,
+                action=action, method=request.method, path=path[:255],
+                status_code=int(response.status_code), ip_address=_client_ip(request),
+                user_agent=(request.headers.get("user-agent") or "")[:255] or None,
+            ))
+            db.commit()
+    except Exception as exc:
+        # Audit failure must not break front-desk work, but it remains visible in server logs.
+        print(f"AUDIT_LOG_WRITE_FAILED: {exc}")
+
+@app.middleware("http")
+async def security_rate_limit_and_audit(request: Request, call_next):
+    ip = _client_ip(request)
+    if request.url.path == "/auth/login" and request.method == "POST":
+        if _limited(f"login:{ip}", int(os.getenv("LOGIN_RATE_LIMIT", "8")), 60):
+            response = _deny("Too many login attempts. Try again shortly.", 429)
+            response.headers["Retry-After"] = "60"
+            return _apply_security_headers(response, request)
+    if request.url.path == "/auth/setup" and request.method == "POST":
+        if _limited(f"setup:{ip}", 5, 300):
+            response = _deny("Too many setup attempts. Try again later.", 429)
+            response.headers["Retry-After"] = "300"
+            return _apply_security_headers(response, request)
+    response = await call_next(request)
+    _write_audit(request, response)
+    return _apply_security_headers(response, request)
+
+
+@app.middleware("http")
+async def authentication_gate(request:Request, call_next):
+    path=request.url.path
+    if request.method=="OPTIONS" or path in PUBLIC_PATHS:
+        return await call_next(request)
+    auth=request.headers.get("Authorization","")
+    if not auth.startswith("Bearer "):
+        return _deny("Authentication required",401)
+    try:
+        claims=decode_token(auth[7:])
+    except HTTPException as e:
+        return _deny(e.detail,e.status_code)
+
+    with SessionLocal() as db:
+        user=db.get(User,int(claims.get("sub",0)))
+        if not user or not user.is_active:
+            return _deny("User unavailable",401)
+        if int(claims.get("clinic_id",-1)) != user.clinic_id or claims.get("role") != _role_value(user):
+            return _deny("Authentication claims are stale; sign in again",401)
+        request.state.user={"sub":str(user.id),"clinic_id":user.clinic_id,"role":_role_value(user),"doctor_id":user.doctor_id}
+
+        qclinic=request.query_params.get("clinic_id")
+        if qclinic and int(qclinic)!=user.clinic_id:
+            return _deny("Clinic access denied")
+
+        # Path-parameter tenant isolation. Collection routes are constrained by query/body checks.
+        parts=[x for x in path.split("/") if x]
+        if len(parts)>=2 and parts[1].isdigit():
+            entity_id=int(parts[1]); entity=None
+            if parts[0]=="clinics": entity=db.get(Clinic,entity_id)
+            elif parts[0]=="doctors": entity=db.get(Doctor,entity_id)
+            elif parts[0]=="patients": entity=db.get(Patient,entity_id)
+            elif parts[0]=="schedules": entity=db.get(DoctorSchedule,entity_id)
+            elif parts[0]=="appointments": entity=db.get(Appointment,entity_id)
+            elif parts[0]=="waiting-list": entity=db.get(WaitingListEntry,entity_id)
+            elif parts[0]=="users": entity=db.get(User,entity_id)
+            if entity is not None and getattr(entity,"clinic_id",user.clinic_id)!=user.clinic_id:
+                return _deny("Clinic access denied")
+
+        role=_role_value(user)
+        if role=="SECRETARY":
+            # Secretaries operate the front desk but cannot alter clinic configuration or user access.
+            config_write=(request.method in {"POST","PATCH","DELETE"} and (
+                path=="/clinics" or path.startswith("/clinics/") or path=="/doctors" or
+                (path.startswith("/doctors/") and path.endswith("/schedule")) or path=="/services" or
+                path.startswith("/services/") or path.startswith("/schedules/") or path.startswith("/users")
+            ))
+            if config_write: return _deny("OWNER role required")
+        elif role=="DOCTOR":
+            # Doctor accounts are intentionally read-only in the front-desk pilot.
+            if request.method!="GET": return _deny("Doctor access is read-only")
+            if path.startswith("/waiting-list") or path.startswith("/users") or path=="/patients":
+                return _deny("Doctor access denied")
+            did=user.doctor_id
+            if not did: return _deny("Doctor account is not linked to a doctor profile")
+            qdoctor=request.query_params.get("doctor_id")
+            if qdoctor and int(qdoctor)!=did: return _deny("Doctor scope denied")
+            if len(parts)>=2 and parts[0]=="doctors" and parts[1].isdigit() and int(parts[1])!=did:
+                return _deny("Doctor scope denied")
+            if len(parts)>=2 and parts[0]=="appointments" and parts[1].isdigit():
+                a=db.get(Appointment,int(parts[1]))
+                if a and a.doctor_id!=did: return _deny("Doctor scope denied")
+            if len(parts)>=2 and parts[0]=="patients" and parts[1].isdigit() and not _doctor_related_patient(db,int(parts[1]),did):
+                return _deny("Patient scope denied")
+            if path.startswith("/dashboard") or path=="/attention-queue" or path=="/appointments":
+                if not qdoctor or int(qdoctor)!=did: return _deny("Doctor scope requires doctor_id")
+
+    return await call_next(request)
+
+@app.get("/ready")
+def readiness(db:Session=Depends(get_db)):
+    """Pilot readiness probe: verifies database access and expected Alembic revision."""
+    expected_revision = "0006_audit_logs"
+    try:
+        db.execute(text("SELECT 1"))
+        current_revision = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Database not ready: {exc}")
+    if current_revision != expected_revision:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Database migration is not at the expected revision",
+                "expected": expected_revision,
+                "current": current_revision,
+            },
+        )
+    return {"status":"ready","database":"ok","alembic":current_revision,"version":"4.5.4-pilot.1"}
+
+@app.get("/auth/status")
+def auth_status(db:Session=Depends(get_db)):
+    return {"setup_required":db.scalar(select(func.count(User.id)))==0,"clinic_count":db.scalar(select(func.count(Clinic.id))) or 0}
+
+@app.get("/auth/setup-clinics",response_model=list[ClinicOut])
+def setup_clinics(db:Session=Depends(get_db)):
+    if db.scalar(select(func.count(User.id)))!=0: raise HTTPException(403,"Setup already completed")
+    return db.scalars(select(Clinic).order_by(Clinic.name)).all()
+
+@app.post("/auth/setup",response_model=TokenOut)
+def auth_setup(body:SetupOwner,db:Session=Depends(get_db)):
+    if db.scalar(select(func.count(User.id)))!=0: raise HTTPException(409,"Initial owner already configured")
+    clinic=None
+    if body.clinic_id is not None:
+        clinic=db.get(Clinic,body.clinic_id)
+        if not clinic: raise HTTPException(404,"Clinic not found")
+    else:
+        name=(body.clinic_name or "").strip()
+        if not name: raise HTTPException(400,"Clinic name is required for a fresh installation")
+        clinic=Clinic(name=name,timezone=(body.timezone or "Asia/Beirut").strip() or "Asia/Beirut")
+        db.add(clinic); db.flush()
+    email=body.email.strip().lower()
+    if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"Email already exists")
+    u=User(clinic_id=clinic.id,doctor_id=None,email=email,full_name=body.full_name.strip(),password_hash=hash_password(body.password),role=UserRole.OWNER,is_active=True)
+    db.add(u); db.commit(); db.refresh(u); return {"access_token":make_token(u),"user":u}
+
+@app.post("/auth/login",response_model=TokenOut)
+def auth_login(body:LoginIn,db:Session=Depends(get_db)):
+    u=db.scalar(select(User).where(User.email==body.email.strip().lower()))
+    if not u or not u.is_active or not verify_password(body.password,u.password_hash): raise HTTPException(401,"Invalid email or password")
+    return {"access_token":make_token(u),"user":u}
+@app.get("/auth/me",response_model=UserOut)
+def auth_me(request:Request,db:Session=Depends(get_db)):
+    u=db.get(User,int(request.state.user["sub"]))
+    if not u or not u.is_active: raise HTTPException(401,"User unavailable")
+    return u
+
+
+def _validate_user_role(db:Session, clinic_id:int, role_text:str, doctor_id:int|None):
+    try: role=UserRole(role_text.upper())
+    except ValueError: raise HTTPException(400,"Role must be OWNER, SECRETARY or DOCTOR")
+    if role==UserRole.DOCTOR:
+        if not doctor_id: raise HTTPException(400,"Doctor role must be linked to a doctor")
+        doctor=db.get(Doctor,doctor_id)
+        if not doctor or doctor.clinic_id!=clinic_id: raise HTTPException(404,"Doctor not found in clinic")
+    elif doctor_id is not None:
+        raise HTTPException(400,"doctor_id is only valid for DOCTOR users")
+    return role
+
+@app.get("/users",response_model=list[UserOut])
+def list_users(request:Request,db:Session=Depends(get_db)):
+    if request.state.user["role"]!="OWNER": raise HTTPException(403,"OWNER role required")
+    return db.scalars(select(User).where(User.clinic_id==int(request.state.user["clinic_id"])).order_by(User.full_name)).all()
+
+@app.post("/users",response_model=UserOut)
+def create_user(body:UserCreate,request:Request,db:Session=Depends(get_db)):
+    if request.state.user["role"]!="OWNER": raise HTTPException(403,"OWNER role required")
+    clinic_id=int(request.state.user["clinic_id"]); email=body.email.strip().lower()
+    if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"Email already exists")
+    role=_validate_user_role(db,clinic_id,body.role,body.doctor_id)
+    u=User(clinic_id=clinic_id,doctor_id=body.doctor_id,email=email,full_name=body.full_name.strip(),password_hash=hash_password(body.password),role=role,is_active=True)
+    db.add(u); db.commit(); db.refresh(u); return u
+
+@app.patch("/users/{user_id}",response_model=UserOut)
+def update_user(user_id:int,body:UserUpdate,request:Request,db:Session=Depends(get_db)):
+    if request.state.user["role"]!="OWNER": raise HTTPException(403,"OWNER role required")
+    u=db.get(User,user_id)
+    if not u or u.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(404,"User not found")
+    new_role=body.role.upper() if body.role else _role_value(u)
+    new_doctor=body.doctor_id if body.role is not None or body.doctor_id is not None else u.doctor_id
+    role=_validate_user_role(db,u.clinic_id,new_role,new_doctor)
+    if body.is_active is False and u.id==int(request.state.user["sub"]): raise HTTPException(409,"You cannot deactivate your own account")
+    if (_role_value(u)=="OWNER" and (role!=UserRole.OWNER or body.is_active is False)):
+        other=db.scalar(select(func.count(User.id)).where(User.clinic_id==u.clinic_id,User.role==UserRole.OWNER,User.is_active==True,User.id!=u.id)) or 0
+        if other==0: raise HTTPException(409,"At least one active OWNER is required")
+    if body.full_name is not None: u.full_name=body.full_name.strip()
+    u.role=role; u.doctor_id=new_doctor
+    if body.is_active is not None: u.is_active=body.is_active
+    if body.password: u.password_hash=hash_password(body.password)
+    db.commit(); db.refresh(u); return u
+
+@app.get("/audit-logs", response_model=list[AuditLogOut])
+def audit_logs(request: Request, limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    if request.state.user["role"] != "OWNER":
+        raise HTTPException(403, "OWNER role required")
+    clinic_id = int(request.state.user["clinic_id"])
+    return db.scalars(
+        select(AuditLog).where(AuditLog.clinic_id == clinic_id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
+    ).all()
+
 @app.get("/health")
-def health(): return {"status":"ok","version":"3.0.0-alpha.5"}
+def health(): return {"status":"ok","version":"4.5.3-pilot.1"}
 
 @app.post("/clinics", response_model=ClinicOut)
-def create_clinic(body: ClinicCreate, db: Session=Depends(get_db)):
-    obj=Clinic(**body.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
+def create_clinic(body: ClinicCreate, request:Request, db: Session=Depends(get_db)):
+    raise HTTPException(403,"Creating additional clinics is disabled in pilot mode")
 @app.get("/clinics", response_model=list[ClinicOut])
-def list_clinics(db: Session=Depends(get_db)): return db.scalars(select(Clinic).order_by(Clinic.name)).all()
+def list_clinics(request:Request, db: Session=Depends(get_db)):
+    return db.scalars(select(Clinic).where(Clinic.id==int(request.state.user["clinic_id"]))).all()
 
 @app.patch("/clinics/{clinic_id}", response_model=ClinicOut)
 def update_clinic(clinic_id:int, body:ClinicUpdate, db:Session=Depends(get_db)):
@@ -43,12 +326,16 @@ def update_clinic(clinic_id:int, body:ClinicUpdate, db:Session=Depends(get_db)):
     db.commit(); db.refresh(obj); return obj
 
 @app.post("/doctors", response_model=DoctorOut)
-def create_doctor(body: DoctorCreate, db: Session=Depends(get_db)):
+def create_doctor(body: DoctorCreate, request:Request, db: Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     if not db.get(Clinic, body.clinic_id): raise HTTPException(404,"Clinic not found")
     obj=Doctor(**body.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
 @app.get("/doctors", response_model=list[DoctorOut])
-def list_doctors(clinic_id:int, db:Session=Depends(get_db)):
-    return db.scalars(select(Doctor).where(Doctor.clinic_id==clinic_id).order_by(Doctor.name)).all()
+def list_doctors(clinic_id:int, request:Request, db:Session=Depends(get_db)):
+    stmt=select(Doctor).where(Doctor.clinic_id==clinic_id)
+    if request.state.user["role"]=="DOCTOR":
+        stmt=stmt.where(Doctor.id==request.state.user["doctor_id"])
+    return db.scalars(stmt.order_by(Doctor.name)).all()
 
 @app.patch("/doctors/{doctor_id}", response_model=DoctorOut)
 def update_doctor(doctor_id:int, body:DoctorUpdate, db:Session=Depends(get_db)):
@@ -58,13 +345,14 @@ def update_doctor(doctor_id:int, body:DoctorUpdate, db:Session=Depends(get_db)):
     db.commit(); db.refresh(obj); return obj
 
 @app.post("/services", response_model=ServiceOut)
-def create_service(body: ServiceCreate, db: Session=Depends(get_db)):
+def create_service(body: ServiceCreate, request:Request, db: Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     if not db.get(Clinic, body.clinic_id): raise HTTPException(404,"Clinic not found")
     if body.duration_minutes <= 0: raise HTTPException(400,"Duration must be greater than zero")
     obj=Service(**body.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
 @app.get("/services", response_model=list[ServiceOut])
 def list_services(clinic_id:int, db:Session=Depends(get_db)):
-    return db.scalars(select(Service).where(Service.clinic_id==clinic_id,Service.is_active.is_(True)).order_by(Service.name)).all()
+    return db.scalars(select(Service).where(Service.clinic_id==clinic_id).order_by(Service.name)).all()
 
 @app.patch("/services/{service_id}", response_model=ServiceOut)
 def update_service(service_id:int, body:ServiceUpdate, db:Session=Depends(get_db)):
@@ -75,7 +363,8 @@ def update_service(service_id:int, body:ServiceUpdate, db:Session=Depends(get_db
     db.commit(); db.refresh(obj); return obj
 
 @app.post("/patients", response_model=PatientOut)
-def create_patient(body: PatientCreate, db: Session=Depends(get_db)):
+def create_patient(body: PatientCreate, request:Request, db: Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     existing=db.scalar(select(Patient).where(Patient.clinic_id==body.clinic_id, Patient.phone==body.phone))
     if existing: raise HTTPException(409,"Patient with this phone already exists")
     obj=Patient(**body.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
@@ -100,7 +389,8 @@ def get_patient_history(patient_id:int, db:Session=Depends(get_db)):
     return patient_history(db,patient_id)
 
 @app.post("/doctors/{doctor_id}/schedule", response_model=ScheduleOut)
-def add_schedule(doctor_id:int, body:ScheduleCreate, db:Session=Depends(get_db)):
+def add_schedule(doctor_id:int, body:ScheduleCreate, request:Request, db:Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     doctor=db.get(Doctor,doctor_id)
     if not doctor or doctor.clinic_id!=body.clinic_id: raise HTTPException(404,"Doctor not found in clinic")
     if not 0 <= body.weekday <= 6: raise HTTPException(400,"weekday must be 0-6")
@@ -145,7 +435,8 @@ def availability(doctor_id:int, clinic_id:int, service_id:int, day:date, db:Sess
     return slots
 
 @app.post("/appointments", response_model=AppointmentOut)
-def create_appointment(body:AppointmentCreate, db:Session=Depends(get_db)):
+def create_appointment(body:AppointmentCreate, request:Request, db:Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     _,_,service=validate_entities(db,body.clinic_id,body.doctor_id,body.patient_id,body.service_id)
     end=calculate_end(body.start_at,service.duration_minutes)
     ensure_in_schedule(db,body.clinic_id,body.doctor_id,body.start_at,end)
@@ -241,7 +532,8 @@ def waiting_view(x: WaitingListEntry):
     )
 
 @app.post("/waiting-list", response_model=WaitingListView)
-def add_waiting_list(body: WaitingListCreate, db:Session=Depends(get_db)):
+def add_waiting_list(body: WaitingListCreate, request:Request, db:Session=Depends(get_db)):
+    if body.clinic_id!=int(request.state.user["clinic_id"]): raise HTTPException(403,"Clinic access denied")
     patient, doctor, service = validate_entities(db, body.clinic_id, body.doctor_id, body.patient_id, body.service_id)
     if body.earliest_time and body.latest_time and body.earliest_time > body.latest_time:
         raise HTTPException(400, "Earliest time must be before latest time")

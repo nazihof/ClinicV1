@@ -1,8 +1,39 @@
 import enum
 from datetime import datetime, date, time
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Date, Time, Numeric, Enum,Boolean, Text,true, UniqueConstraint
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Date, Time, Numeric, Enum, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
+
+class UserRole(str, enum.Enum):
+    OWNER = "OWNER"
+    SECRETARY = "SECRETARY"
+    DOCTOR = "DOCTOR"
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    clinic_id: Mapped[int] = mapped_column(ForeignKey("clinics.id"), index=True)
+    doctor_id: Mapped[int | None] = mapped_column(ForeignKey("doctors.id"), nullable=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(160))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.SECRETARY, index=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    clinic_id: Mapped[int | None] = mapped_column(ForeignKey("clinics.id"), nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    method: Mapped[str] = mapped_column(String(12))
+    path: Mapped[str] = mapped_column(String(255))
+    status_code: Mapped[int] = mapped_column(Integer, index=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class AppointmentStatus(str, enum.Enum):
     PENDING = "PENDING"
@@ -34,7 +65,6 @@ class Service(Base):
     name: Mapped[str] = mapped_column(String(120))
     duration_minutes: Mapped[int] = mapped_column(Integer)
     price: Mapped[float | None] = mapped_column(Numeric(10,2), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean,nullable=False,default=True,server_default=true())
 
 class Patient(Base):
     __tablename__ = "patients"

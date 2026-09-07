@@ -22,6 +22,9 @@ services:
       - .:/app
     environment:
       DATABASE_URL: postgresql+psycopg://clinic:clinic@db:5432/clinic
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (32+ chars)}
+      ACCESS_TOKEN_HOURS: ${ACCESS_TOKEN_HOURS:-8}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     command: sh -c "pip install --no-cache-dir -r requirements.txt && python -m backend.app.migrate && uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
       - "8000:8000"

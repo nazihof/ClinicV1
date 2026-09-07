@@ -19,7 +19,7 @@ class DoctorOut(ORM):
 class ServiceCreate(BaseModel):
     clinic_id: int; name: str; duration_minutes: int; price: float | None = None
 class ServiceOut(ORM):
-    id: int; clinic_id: int; name: str; duration_minutes: int; is_active: bool=True; price: float | None = None
+    id: int; clinic_id: int; name: str; duration_minutes: int; price: float | None = None
 
 class PatientCreate(BaseModel):
     clinic_id: int; full_name: str; phone: str; preferred_language: str = "ar"; notes: str | None = None
@@ -171,3 +171,53 @@ class RecoveryResultOut(BaseModel):
     patient_id: int
     start_at: datetime
     status: str
+
+class SetupOwner(BaseModel):
+    clinic_id: int | None = None
+    clinic_name: str | None = None
+    timezone: str = "Asia/Beirut"
+    full_name: str
+    email: str
+    password: str
+class LoginIn(BaseModel):
+    email: str
+    password: str
+class UserOut(BaseModel):
+    id:int
+    clinic_id:int
+    doctor_id:int | None = None
+    email:str
+    full_name:str
+    role:str
+    is_active:bool
+
+class UserCreate(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    role: str = "SECRETARY"
+    doctor_id: int | None = None
+
+class UserUpdate(BaseModel):
+    full_name: str | None = None
+    role: str | None = None
+    doctor_id: int | None = None
+    is_active: bool | None = None
+    password: str | None = None
+class TokenOut(BaseModel):
+    access_token:str
+    token_type:str="bearer"
+    user:UserOut
+
+
+class AuditLogOut(ORM):
+    id: int
+    clinic_id: int | None = None
+    user_id: int | None = None
+    action: str
+    method: str
+    path: str
+    status_code: int
+    ip_address: str | None = None
+    user_agent: str | None = None
+    created_at: datetime

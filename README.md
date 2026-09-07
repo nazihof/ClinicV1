@@ -1,98 +1,111 @@
-# Clinic Front-Desk Intelligence — Sprint 3G Operational Dashboard
+# Clinic Front-Desk — Sprint 4.5D
 
-Sprint 3G builds directly on the working Sprint 3E package. Sprint 3F Revenue at Risk / Revenue Recovered Intelligence is intentionally deferred until after the pilot deployment.
+## Final Pilot Readiness / Deployment Rehearsal
 
-## What Sprint 3G adds
+Sprint 4.5D builds on Sprint 4.5C. It deliberately adds no new business feature, no Sprint 4 WhatsApp/communication layer, and no Sprint 3F revenue intelligence.
 
-A new **Operational dashboard** is available from the main top bar. It is designed for clinic owners and supervisors to understand appointment operations without exposing financial estimates.
+Backend version: `4.5.4-pilot.1`
+Alembic head: `0006_audit_logs` (no new migration)
 
-Operational KPIs include:
-- Total appointments for a selected date range
-- Completion rate
-- No-show rate
-- Cancellation rate
-- Cancellation recovery rate from Sprint 3E
-- Active waiting-list count
-- Appointment flow: Pending, Confirmed, Checked-in, Completed, Cancelled, No-show
-- Open workflow count
-- Average booking lead time
-- Current risk mix: LOW / MEDIUM / HIGH
-- Recovered vs unrecovered cancelled slots
-- Daily appointment activity trend
-- Doctor-by-doctor operational comparison
+## What this sprint adds
 
-The dashboard supports:
-- Start date / end date
-- All doctors or one doctor
-- Up to 366 days per query
+### 1. Real readiness probe
+`GET /ready` verifies:
+- FastAPI can reach PostgreSQL;
+- the database has an Alembic version;
+- the current revision is exactly `0006_audit_logs`.
 
-## New API
+It returns HTTP 503 when the database or migration state is not ready. Production Docker now uses `/ready` for the backend health check.
 
-`GET /dashboard/operational?clinic_id=1&start_day=2026-09-01&end_day=2026-09-30`
+### 2. Pilot preflight script
 
-Optional doctor filter:
+```cmd
+scripts\pilot_preflight.cmd
+```
 
-`GET /dashboard/operational?clinic_id=1&start_day=2026-09-01&end_day=2026-09-30&doctor_id=1`
+Checks Docker, Docker Compose, `.env`, `JWT_SECRET`, and project-root structure before a rehearsal.
 
-## Important metric definitions
+### 3. Automated smoke test
 
-- **Completion rate** = completed appointments / all appointments in the selected period.
-- **No-show rate** = no-shows / (completed + no-show outcomes). Cancelled appointments are excluded from this attendance denominator.
-- **Cancellation rate** = cancelled appointments / all appointments.
-- **Cancellation recovery rate** = cancelled appointments with a `SLOT_RECOVERED` event / cancelled appointments.
-- **Open workflow** = pending + confirmed + checked-in appointments.
-- **Average booking lead** = average time between appointment creation and appointment start.
+```cmd
+scripts\pilot_smoke_test.cmd
+```
 
-## Sprint 3F is deliberately NOT included
+Checks:
+- Alembic head;
+- backend `/health`;
+- backend `/ready`;
+- frontend HTTP 200.
 
-This package does not calculate:
-- Revenue at risk
-- Revenue recovered
-- Financial loss estimates
-- Financial recovery estimates
+### 4. Safe restore drill
 
-Those remain deferred for after pilot deployment, as requested.
+```cmd
+scripts\restore_drill.cmd backups\YOUR_BACKUP.sql
+```
 
-## Database
+This restores your backup into a disposable PostgreSQL database, validates important tables, and deletes the temporary database. It does **not** replace your working clinic database.
 
-Sprint 3G adds no tables or columns. Alembic remains:
+### 5. Pilot readiness runbook
+See `PILOT_READINESS_RUNBOOK.md` for the complete deployment rehearsal and rollback rules.
 
-`0003_waiting_list (head)`
+## Upgrade from Sprint 4.5C
 
-No new migration is required.
+First create and verify a backup:
 
-## Version
+```cmd
+scripts\backup_db.cmd
+scripts\verify_backup.cmd backups\YOUR_BACKUP_FILE.sql
+```
 
-`GET /health` returns:
+Then:
 
-`{"status":"ok","version":"3.0.0-alpha.5"}`
+```cmd
+docker compose down
+```
 
-## Upgrade from Sprint 3E
+Do not use `docker compose down -v`.
 
-1. Back up the current project folder.
-2. Run `docker compose down`.
-3. Do **not** run `docker compose down -v`.
-4. Copy/replace this Sprint 3G package into the same existing project directory.
-5. Run `docker compose up --build`.
-6. Verify `http://127.0.0.1:8000/health` returns version `3.0.0-alpha.5`.
-7. Run `docker compose exec backend alembic current`; expected: `0003_waiting_list (head)`.
-8. Open `http://127.0.0.1:3000`.
-9. Click **Operational dashboard**.
+Copy Sprint 4.5D over the same project folder, keeping `.env` and the Docker database volume, then:
 
-## Sprint 3G acceptance test
+```cmd
+docker compose up --build
+```
 
-- Existing Sprint 3E clinic data is still visible.
-- Operational dashboard opens from the main toolbar.
-- A 30-day range loads without error.
-- Changing the doctor filter recalculates metrics for that doctor.
-- Completed appointments increase completion metrics.
-- No-show appointments increase the no-show metric.
-- Cancelled appointments increase the cancellation metric.
-- A Sprint 3E recovered cancellation increases recovered cancelled slots and recovery rate.
-- Active waiting-list entries appear in the active waiting-list metric.
-- Revenue metrics are absent.
-- The normal Schedule, Attention Queue, Waiting list, Administration, and appointment actions still work.
+Verify:
 
-## Next
+```cmd
+docker compose exec backend alembic current
+```
 
-After Sprint 3G passes acceptance testing, proceed to **Sprint 4 — WhatsApp Automation and communication workflow**. Sprint 3F remains deferred until after deployment/pilot learning.
+Expected: `0006_audit_logs (head)`
+
+Open:
+
+`http://127.0.0.1:8000/health`
+
+Expected version: `4.5.4-pilot.1`
+
+Then open:
+
+`http://127.0.0.1:8000/ready`
+
+Expected:
+
+```json
+{"status":"ready","database":"ok","alembic":"0006_audit_logs","version":"4.5.4-pilot.1"}
+```
+
+## Recommended acceptance sequence
+
+```cmd
+scripts\pilot_preflight.cmd
+scripts\pilot_smoke_test.cmd
+scripts\backup_db.cmd
+scripts\verify_backup.cmd backups\YOUR_BACKUP_FILE.sql
+scripts\restore_drill.cmd backups\YOUR_BACKUP_FILE.sql
+```
+
+After these pass, perform the manual OWNER/SECRETARY/DOCTOR and appointment workflow checks in `PILOT_READINESS_RUNBOOK.md`.
+
+## Scope boundary
+Passing Sprint 4.5D means the current build has completed the technical pilot-readiness rehearsal defined for this project. It is not a claim of healthcare regulatory certification, formal penetration testing, disaster-recovery SLA, or production compliance certification.

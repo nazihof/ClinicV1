@@ -1,41 +1,10 @@
-# Python temporary files
 __pycache__/
 *.pyc
 .pytest_cache/
-
-# Python virtual environment
 .venv/
-venv/
-
-# Frontend dependencies and generated output
 node_modules/
 .next/
-dist/
-build/
-
-# Environment variables and secrets
-.env
-.env.*
-!.env.example
-
-# Local database
 clinic.db
-*.sqlite
-*.sqlite3
-
-# Logs
-*.log
-
-# Editor settings
-.vscode/
-.idea/
-
-# Operating-system files
-Thumbs.db
-.DS_Store
-
-# Local PostgreSQL data directory, if present
-postgres_data/
-
-# Patient uploads, if stored locally
-uploads/
+.env
+.env.production
+backups/*.sql
