@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime, date, time
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Date, Time, Numeric, Enum, Text, UniqueConstraint
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Date,Boolean, Time, Numeric, Enum,text, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -65,6 +65,7 @@ class Service(Base):
     name: Mapped[str] = mapped_column(String(120))
     duration_minutes: Mapped[int] = mapped_column(Integer)
     price: Mapped[float | None] = mapped_column(Numeric(10,2), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean,nullable=False,default=True,server_default=text("true"))
 
 class Patient(Base):
     __tablename__ = "patients"

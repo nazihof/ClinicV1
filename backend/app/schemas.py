@@ -17,9 +17,9 @@ class DoctorOut(ORM):
     id: int; clinic_id: int; name: str; specialty: str | None = None
 
 class ServiceCreate(BaseModel):
-    clinic_id: int; name: str; duration_minutes: int; price: float | None = None
+    clinic_id: int; name: str; duration_minutes: int;is_active: bool = True; price: float | None = None
 class ServiceOut(ORM):
-    id: int; clinic_id: int; name: str; duration_minutes: int; price: float | None = None
+    id: int; clinic_id: int; name: str; duration_minutes: int;is_active:bool; price: float | None = None
 
 class PatientCreate(BaseModel):
     clinic_id: int; full_name: str; phone: str; preferred_language: str = "ar"; notes: str | None = None
