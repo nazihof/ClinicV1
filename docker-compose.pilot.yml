@@ -24,6 +24,8 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-clinic}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-clinic}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.pilot}
       ACCESS_TOKEN_HOURS: ${ACCESS_TOKEN_HOURS:-8}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
       CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS in .env.pilot}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
       APP_ENV: production
@@ -46,7 +48,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: https://${API_DOMAIN}
+        NEXT_PUBLIC_API_BASE_URL: https://api.167.172.169.129.nip.io
     restart: unless-stopped
     expose:
       - "3000"

@@ -1,14 +1,17 @@
-from datetime import datetime, timedelta, date, time
+from datetime import datetime, timedelta, date,timezone,time
 import os
 import time as pytime
+import hashlib
+import hmac
 from collections import defaultdict, deque
 from threading import Lock
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, func, or_, text
 from sqlalchemy.orm import Session
 from .database import get_db, SessionLocal
-from .models import Clinic, Doctor, Service, Patient, DoctorSchedule, Appointment, AppointmentEvent, AppointmentStatus, RiskScore, WaitingListEntry, User, UserRole, AuditLog
+from .models import Clinic, Doctor, Service, Patient, DoctorSchedule, Appointment, AppointmentEvent, AppointmentStatus, RiskScore, WaitingListEntry, User, UserRole, AuditLog,WhatsAppChannel, Conversation, Message
 from .schemas import *
 from .booking import validate_entities, ensure_in_schedule, ensure_no_overlap, calculate_end, ACTIVE
 from .risk import calculate_appointment_risk, patient_history
@@ -18,11 +21,7 @@ from .auth import hash_password, verify_password, make_token, decode_token
 
 app = FastAPI(title="Clinic Front-Desk Intelligence", version="4.5.4-pilot.1")
 
-def _cors_origins():
-    raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
 
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def event(db, appointment_id, event_type, details=None):
     db.add(AppointmentEvent(appointment_id=appointment_id, event_type=event_type, details=details))
@@ -37,7 +36,7 @@ def appointment_view(a: Appointment):
     )
 
 
-PUBLIC_PATHS={"/health","/ready","/auth/status","/auth/setup-clinics","/auth/setup","/auth/login","/docs","/openapi.json","/redoc"}
+PUBLIC_PATHS={"/health","/ready","/auth/status","/auth/setup-clinics","/auth/setup","/auth/login","/docs","/openapi.json","/redoc","/whatsapp/webhook"}
 
 def _deny(detail="Access denied", status=403):
     from fastapi.responses import JSONResponse
@@ -113,6 +112,16 @@ def _write_audit(request: Request, response):
 @app.middleware("http")
 async def security_rate_limit_and_audit(request: Request, call_next):
     ip = _client_ip(request)
+   
+    # Public webhook endpoint for Meta verification/events
+    if request.url.path == "/whatsapp/webhook":
+    	response = await call_next(request)
+    	return _apply_security_headers(response, request)
+
+# existing authentication logic continues below
+   # if not user:
+    #	return _deny("Authentication required", 401)
+
     if request.url.path == "/auth/login" and request.method == "POST":
         if _limited(f"login:{ip}", int(os.getenv("LOGIN_RATE_LIMIT", "8")), 60):
             response = _deny("Too many login attempts. Try again shortly.", 429)
@@ -196,6 +205,230 @@ async def authentication_gate(request:Request, call_next):
                 if not qdoctor or int(qdoctor)!=did: return _deny("Doctor scope requires doctor_id")
 
     return await call_next(request)
+
+def _cors_origins():
+    raw = os.getenv("CORS_ORIGINS","http://localhost:3000,http://127.0.0.1:3000")
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/whatsapp/webhook", response_class=PlainTextResponse)
+def whatsapp_webhook_verify(
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+):
+    expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
+
+    if (
+        hub_mode == "subscribe"
+        and expected_token
+        and hub_verify_token == expected_token
+    ):
+        return hub_challenge
+
+    raise HTTPException(
+        status_code=403,
+        detail="Webhook verification failed",
+    )
+
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook_receive(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    app_secret = os.getenv("WHATSAPP_APP_SECRET")
+
+    if not app_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="WhatsApp app secret is not configured",
+        )
+
+    raw_body = await request.body()
+
+    signature_header = request.headers.get("X-Hub-Signature-256")
+
+    if not signature_header:
+        print("WHATSAPP SIGNATURE CHECK: MISSING")
+        raise HTTPException(
+            status_code=401,
+            detail="Missing WhatsApp webhook signature",
+        )
+
+    expected_signature = "sha256=" + hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        signature_header,
+        expected_signature,
+    ):
+        print("WHATSAPP SIGNATURE CHECK: INVALID")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid WhatsApp webhook signature",
+        )
+
+    payload = await request.json()
+
+    try:
+        entries = payload.get("entry", [])
+
+        for entry in entries:
+            changes = entry.get("changes", [])
+
+            for change in changes:
+                value = change.get("value", {})
+
+                metadata = value.get("metadata", {})
+                phone_number_id = metadata.get("phone_number_id")
+
+                if not phone_number_id:
+                    continue
+
+                # Determine which clinic owns this WhatsApp number
+                channel = db.scalar(
+                    select(WhatsAppChannel).where(
+                        WhatsAppChannel.phone_number_id == phone_number_id,
+                        WhatsAppChannel.is_active == True,
+                    )
+                )
+
+                if not channel:
+                    print(
+                        "WHATSAPP: unknown phone_number_id:",
+                        phone_number_id
+                    )
+                    continue
+
+                contacts = value.get("contacts", [])
+                contact_names = {}
+
+                for contact in contacts:
+                    wa_id = contact.get("wa_id")
+                    profile = contact.get("profile", {})
+
+                    if wa_id:
+                        contact_names[wa_id] = profile.get("name")
+
+                messages = value.get("messages", [])
+
+                for incoming in messages:
+                    provider_message_id = incoming.get("id")
+                    wa_contact_id = incoming.get("from")
+
+                    if not provider_message_id or not wa_contact_id:
+                        continue
+
+                    # Meta may retry the same webhook.
+                    # Never store the same message twice.
+                    existing_message = db.scalar(
+                        select(Message).where(
+                            Message.provider_message_id
+                            == provider_message_id
+                        )
+                    )
+
+                    if existing_message:
+                        continue
+
+                    # Find existing conversation
+                    conversation = db.scalar(
+                        select(Conversation).where(
+                            Conversation.whatsapp_channel_id
+                            == channel.id,
+                            Conversation.wa_contact_id
+                            == wa_contact_id,
+                        )
+                    )
+
+                    timestamp_raw = incoming.get("timestamp")
+
+                    provider_timestamp = None
+
+                    if timestamp_raw:
+                        try:
+                            provider_timestamp = datetime.fromtimestamp(
+                                int(timestamp_raw),
+                                tz=timezone.utc,
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Create conversation if this is the first message
+                    if not conversation:
+                        conversation = Conversation(
+                            clinic_id=channel.clinic_id,
+                            whatsapp_channel_id=channel.id,
+                            wa_contact_id=wa_contact_id,
+                            contact_name=contact_names.get(
+                                wa_contact_id
+                            ),
+                            status="OPEN",
+                            last_message_at=provider_timestamp,
+                        )
+
+                        db.add(conversation)
+                        db.flush()
+
+                    else:
+                        if contact_names.get(wa_contact_id):
+                            conversation.contact_name = (
+                                contact_names[wa_contact_id]
+                            )
+
+                        conversation.last_message_at = (
+                            provider_timestamp
+                            or datetime.now(timezone.utc)
+                        )
+
+                    message_type = incoming.get("type", "unknown")
+
+                    body = None
+
+                    if message_type == "text":
+                        body = (
+                            incoming
+                            .get("text", {})
+                            .get("body")
+                        )
+
+                    message = Message(
+                        clinic_id=channel.clinic_id,
+                        conversation_id=conversation.id,
+                        provider_message_id=provider_message_id,
+                        direction="INBOUND",
+                        message_type=message_type,
+                        body=body,
+                        status="RECEIVED",
+                        provider_timestamp=provider_timestamp,
+                    )
+
+                    db.add(message)
+
+                    print(
+                        f"WHATSAPP STORED clinic={channel.clinic_id} "
+                        f"conversation={conversation.id} "
+                        f"from={wa_contact_id} "
+                        f"type={message_type}"
+                    )
+
+        db.commit()
+
+    except Exception as exc:
+        db.rollback()
+        print("WHATSAPP WEBHOOK ERROR:", repr(exc))
+
+        # For now expose the failure while testing.
+        raise HTTPException(
+            status_code=500,
+            detail="WhatsApp webhook processing failed",
+        )
+
+    return {"status": "ok"}
 
 @app.get("/ready")
 def readiness(db:Session=Depends(get_db)):

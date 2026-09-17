@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime, date, time
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Date,Boolean, Time, Numeric, Enum,text, Text, UniqueConstraint
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Date,Boolean, Time, Numeric, Enum,text, Text,func, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -139,3 +139,184 @@ class WaitingListEntry(Base):
     patient = relationship("Patient")
     doctor = relationship("Doctor")
     service = relationship("Service")
+
+
+class WhatsAppChannel(Base):
+    __tablename__ = "whatsapp_channels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    clinic_id: Mapped[int] = mapped_column(
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Meta identifiers
+    waba_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    phone_number_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    display_phone_number: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+
+    # We will encrypt/decrypt this in a later 4A step.
+    access_token_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    clinic_id: Mapped[int] = mapped_column(
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    patient_id: Mapped[int | None] = mapped_column(
+        ForeignKey("patients.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    whatsapp_channel_id: Mapped[int] = mapped_column(
+        ForeignKey("whatsapp_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # WhatsApp user's identifier / phone
+    wa_contact_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    contact_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    # OPEN / HUMAN / CLOSED
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="OPEN",
+        server_default="OPEN",
+    )
+
+    last_message_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "whatsapp_channel_id",
+            "wa_contact_id",
+            name="uq_conversation_channel_contact",
+        ),
+    )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    clinic_id: Mapped[int] = mapped_column(
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Meta WhatsApp message ID.
+    # Unique prevents duplicated webhook delivery from creating duplicates.
+    provider_message_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+
+    # INBOUND / OUTBOUND
+    direction: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+    )
+
+    # text / image / document / audio / etc.
+    message_type: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="text",
+        server_default="text",
+    )
+
+    body: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # RECEIVED / SENT / DELIVERED / READ / FAILED
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
+
+    provider_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
