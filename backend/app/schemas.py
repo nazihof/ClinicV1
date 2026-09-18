@@ -5,6 +5,35 @@ from .models import AppointmentStatus
 class ORM(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+
+class WhatsAppSendRequest(BaseModel):
+    phone_number_id: str
+    recipient: str
+    message: str
+
+
+class WhatsAppConversationOut(BaseModel):
+    id: int
+    clinic_id: int
+    wa_contact_id: str
+    contact_name: str | None = None
+    status: str
+    last_message_at: datetime | None = None
+
+
+class WhatsAppMessageOut(BaseModel):
+    id: int
+    conversation_id: int
+    provider_message_id: str | None = None
+    direction: str
+    message_type: str
+    body: str | None = None
+    status: str
+    provider_timestamp: datetime | None = None
+    created_at: datetime
+
+
+
 class ClinicCreate(BaseModel):
     name: str
     timezone: str = "Asia/Beirut"

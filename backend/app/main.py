@@ -3,6 +3,7 @@ import os
 import time as pytime
 import hashlib
 import hmac
+import httpx
 from collections import defaultdict, deque
 from threading import Lock
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
@@ -48,7 +49,50 @@ def _role_value(user):
 def _doctor_related_patient(db, patient_id:int, doctor_id:int)->bool:
     return db.scalar(select(func.count(Appointment.id)).where(Appointment.patient_id==patient_id, Appointment.doctor_id==doctor_id)) > 0
 
+async def send_whatsapp_text(
+    phone_number_id: str,
+    recipient: str,
+    message_body: str,
+):
+    access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
+    if not access_token:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN is not configured")
+
+    url = (
+        f"https://graph.facebook.com/v23.0/"
+        f"{phone_number_id}/messages"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "text",
+        "text": {
+            "body": message_body,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            url,
+            headers=headers,
+            json=payload,
+        )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"WhatsApp API error "
+            f"{response.status_code}: {response.text}"
+        )
+
+    return response.json()
 
 # Sprint 4.5C: pilot-grade abuse protection. This is intentionally simple and
 # process-local; for horizontally scaled production use Redis or an API gateway.
@@ -282,7 +326,52 @@ async def whatsapp_webhook_receive(
 
             for change in changes:
                 value = change.get("value", {})
+		# -------------------------------------------------
+		# Process WhatsApp delivery/read status updates
+		# -------------------------------------------------
 
+		statuses = value.get("statuses", [])
+
+		for status_item in statuses:
+    		    provider_message_id = status_item.get("id")
+    		    meta_status = status_item.get("status")
+
+	            if not provider_message_id or not meta_status:
+        	          continue
+
+    		    message = db.scalar(
+        		select(Message).where(
+            			Message.provider_message_id == provider_message_id
+       			 )
+    		    )
+
+    		if not message:
+        		print("WHATSAPP STATUS: message not found:",provider_message_id)
+        	   continue
+
+    		status_map = {
+        		"sent": "SENT",
+        		"delivered": "DELIVERED",
+        		"read": "READ",
+        		"failed": "FAILED",
+    		}
+
+    		new_status = status_map.get(meta_status.lower())
+
+    		if not new_status:
+        	    print(
+            		"WHATSAPP STATUS: unsupported status:",
+           		 meta_status
+        		)
+        	   continue
+
+    		message.status = new_status
+
+    		print(
+        		f"WHATSAPP STATUS UPDATED "
+        		f"message={message.id} "
+        		f"status={new_status}"
+    		)
                 metadata = value.get("metadata", {})
                 phone_number_id = metadata.get("phone_number_id")
 
@@ -303,7 +392,7 @@ async def whatsapp_webhook_receive(
                         phone_number_id
                     )
                     continue
-
+		#add the new handles value.statuses[			
                 contacts = value.get("contacts", [])
                 contact_names = {}
 
@@ -429,6 +518,179 @@ async def whatsapp_webhook_receive(
         )
 
     return {"status": "ok"}
+
+
+@app.post("/whatsapp/send")
+async def whatsapp_send_message(
+    data: WhatsAppSendRequest,
+    db: Session = Depends(get_db),
+):
+    # 1. Find the WhatsApp channel / clinic
+    channel = db.scalar(
+        select(WhatsAppChannel).where(
+            WhatsAppChannel.phone_number_id == data.phone_number_id,
+            WhatsAppChannel.is_active == True,
+        )
+    )
+
+    if not channel:
+        raise HTTPException(
+            status_code=404,
+            detail="WhatsApp channel not found",
+        )
+
+    # 2. Find or create conversation for recipient
+    conversation = db.scalar(
+        select(Conversation).where(
+            Conversation.whatsapp_channel_id == channel.id,
+            Conversation.wa_contact_id == data.recipient,
+        )
+    )
+
+    if not conversation:
+        conversation = Conversation(
+            clinic_id=channel.clinic_id,
+            whatsapp_channel_id=channel.id,
+            wa_contact_id=data.recipient,
+            status="OPEN",
+            last_message_at=datetime.now(timezone.utc),
+        )
+
+        db.add(conversation)
+        db.flush()
+
+    try:
+        # 3. Send message through Meta
+        result = await send_whatsapp_text(
+            phone_number_id=data.phone_number_id,
+            recipient=data.recipient,
+            message_body=data.message,
+        )
+
+        # 4. Extract Meta message ID
+        messages = result.get("messages", [])
+
+        if not messages or not messages[0].get("id"):
+            raise RuntimeError(
+                "Meta accepted request but returned no message ID"
+            )
+
+        provider_message_id = messages[0]["id"]
+
+        # 5. Store outgoing message
+        outbound_message = Message(
+            clinic_id=channel.clinic_id,
+            conversation_id=conversation.id,
+            provider_message_id=provider_message_id,
+            direction="OUTBOUND",
+            message_type="text",
+            body=data.message,
+            status="SENT",
+            provider_timestamp=datetime.now(timezone.utc),
+        )
+
+        db.add(outbound_message)
+
+        conversation.last_message_at = datetime.now(timezone.utc)
+
+        db.commit()
+
+        return {
+            "status": "sent",
+            "message_id": provider_message_id,
+            "conversation_id": conversation.id,
+            "provider_response": result,
+        }
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+async def whatsapp_send_message(
+    data: WhatsAppSendRequest,
+):
+    try:
+        result = await send_whatsapp_text(
+            phone_number_id=data.phone_number_id,
+            recipient=data.recipient,
+            message_body=data.message,
+        )
+
+        return {
+            "status": "sent",
+            "provider_response": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+@app.get(
+    "/whatsapp/conversations",
+    response_model=list[WhatsAppConversationOut],
+)
+def whatsapp_list_conversations(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(request.state.user["clinic_id"])
+
+    conversations = db.scalars(
+        select(Conversation)
+        .where(
+            Conversation.clinic_id == clinic_id
+        )
+        .order_by(
+            Conversation.last_message_at.desc().nullslast(),
+            Conversation.id.desc(),
+        )
+    ).all()
+
+    return conversations
+
+@app.get(
+    "/whatsapp/conversations/{conversation_id}/messages",
+    response_model=list[WhatsAppMessageOut],
+)
+def whatsapp_conversation_messages(
+    conversation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(request.state.user["clinic_id"])
+
+    conversation = db.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.clinic_id == clinic_id,
+        )
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found",
+        )
+
+    messages = db.scalars(
+        select(Message)
+        .where(
+            Message.conversation_id == conversation.id,
+            Message.clinic_id == clinic_id,
+        )
+        .order_by(
+            Message.created_at.asc(),
+            Message.id.asc(),
+        )
+    ).all()
+
+    return messages
 
 @app.get("/ready")
 def readiness(db:Session=Depends(get_db)):
