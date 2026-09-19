@@ -8,3 +8,4 @@ clinic.db
 .env
 .env.production
 backups/*.sql
+.env.pilot
