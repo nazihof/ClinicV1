@@ -634,8 +634,15 @@ def whatsapp_list_conversations(
 ):
     clinic_id = int(request.state.user["clinic_id"])
 
-    conversations = db.scalars(
-        select(Conversation)
+    rows = db.execute(
+        select(
+            Conversation,
+            WhatsAppChannel.phone_number_id,
+        )
+        .join(
+            WhatsAppChannel,
+            Conversation.whatsapp_channel_id == WhatsAppChannel.id,
+        )
         .where(
             Conversation.clinic_id == clinic_id
         )
@@ -644,8 +651,18 @@ def whatsapp_list_conversations(
             Conversation.id.desc(),
         )
     ).all()
-
-    return conversations
+    return [
+        WhatsAppConversationOut(
+            id=conversation.id,
+            clinic_id=conversation.clinic_id,
+            wa_contact_id=conversation.wa_contact_id,
+            contact_name=conversation.contact_name,
+            status=conversation.status,
+            last_message_at=conversation.last_message_at,
+            phone_number_id=phone_number_id,
+        )
+        for conversation, phone_number_id in rows
+    ]
 
 @app.get(
     "/whatsapp/conversations/{conversation_id}/messages",

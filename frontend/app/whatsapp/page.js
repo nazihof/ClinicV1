@@ -19,6 +19,9 @@ export default function WhatsAppPage() {
   const [messages, setMessages] = useState([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
 
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
 
   // 2) KEEP YOUR EXISTING useEffect HERE
   useEffect(() => {
@@ -121,8 +124,69 @@ export default function WhatsAppPage() {
       </div>
     );
   }
+//send reply function
+  async function sendReply() {
+  if (!selectedConversation) return;
 
+  const text = replyText.trim();
 
+  if (!text) return;
+
+  const token =
+    typeof window !== "undefined"
+      ? localStorage.getItem("clinic_token")
+      : null;
+
+  if (!token) {
+    setSendError("Not authenticated");
+    return;
+  }
+
+  setSending(true);
+  setSendError("");
+
+  try {
+    const response = await fetch(
+      `${API}/whatsapp/send`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          phone_number_id:
+            selectedConversation.phone_number_id,
+          recipient:
+            selectedConversation.wa_contact_id,
+          message: text,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+
+      throw new Error(
+        errorData.detail ||
+          `Failed to send message (${response.status})`
+      );
+    }
+
+    setReplyText("");
+
+    await openConversation(selectedConversation);
+
+  } catch (err) {
+    setSendError(
+      err.message || "Failed to send WhatsApp message"
+    );
+
+  } finally {
+    setSending(false);
+  }
+}
+  
   // 5) MAIN PAGE OUTPUT
   return (
     <div style={{ padding: 24 }}>
@@ -170,67 +234,45 @@ export default function WhatsAppPage() {
 
       {/* 7) PUT MESSAGE HISTORY HERE */}
       {/* AFTER THE CONVERSATION LIST */}
-      {selectedConversation && (
-        <div
-          style={{
-            marginTop: 30,
-            borderTop: "1px solid #ddd",
-            paddingTop: 20,
-          }}
-        >
-          <h2>
-            Conversation with{" "}
-            {selectedConversation.contact_name ||
-              selectedConversation.wa_contact_id}
-          </h2>
+    {selectedConversation && (
+  <div style={{ marginTop: 20 }}>
+    <textarea
+      value={replyText}
+      onChange={(e) => setReplyText(e.target.value)}
+      placeholder="Type a WhatsApp reply..."
+      rows={3}
+      style={{
+        width: "100%",
+        padding: 12,
+        borderRadius: 8,
+        border: "1px solid #ccc",
+      }}
+    />
 
-          {messagesLoading ? (
-            <p>Loading messages...</p>
+    {sendError && (
+      <div
+        style={{
+          marginTop: 8,
+          color: "red",
+        }}
+      >
+        {sendError}
+      </div>
+    )}
 
-          ) : messages.length === 0 ? (
-            <p>No messages yet.</p>
-
-          ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                style={{
-                  marginBottom: 12,
-                  padding: 12,
-                  borderRadius: 8,
-                  border: "1px solid #ddd",
-                  maxWidth: "70%",
-                  marginLeft:
-                    message.direction === "OUTBOUND"
-                      ? "auto"
-                      : "0",
-                }}
-              >
-                <div>
-                  <strong>
-                    {message.direction}
-                  </strong>
-                </div>
-
-                <div>
-                  {message.body ||
-                    `[${message.message_type}]`}
-                </div>
-
-                <div
-                  style={{
-                    fontSize: 12,
-                    marginTop: 5,
-                    opacity: 0.7,
-                  }}
-                >
-                  {message.status}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
+    <button
+      onClick={sendReply}
+      disabled={sending || !replyText.trim()}
+      style={{
+        marginTop: 10,
+        padding: "10px 18px",
+        cursor: "pointer",
+      }}
+    >
+      {sending ? "Sending..." : "Send Reply"}
+    </button>
+  </div>
+)}   
 
     </div>
   );

@@ -16,6 +16,7 @@ class WhatsAppConversationOut(BaseModel):
     id: int
     clinic_id: int
     wa_contact_id: str
+    phone_number_id: str
     contact_name: str | None = None
     status: str
     last_message_at: datetime | None = None
