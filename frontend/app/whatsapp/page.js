@@ -2,6 +2,12 @@
 
 import { useEffect, useState } from "react";
 
+const API =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  (typeof window !== "undefined"
+    ? `http://${window.location.hostname}:8000`
+    : "http://localhost:8000");
+    
 export default function WhatsAppPage() {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -22,7 +28,7 @@ export default function WhatsAppPage() {
 
       try {
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/whatsapp/conversations`,
+          `${API}/whatsapp/conversations`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
