@@ -418,7 +418,8 @@ async def whatsapp_webhook_receive(
 
                 existing_message = db.scalar(
                     select(Message).where(
-                        Message.provider_message_id == provider_message_id
+                        Message.provider_message_id == provider_message_id,
+                        Message.clinic_id == channel.clinic_id,
                     )
                 )
 
@@ -518,6 +519,7 @@ async def whatsapp_send_message(
     channel = db.scalar(
         select(WhatsAppChannel).where(
             WhatsAppChannel.phone_number_id == data.phone_number_id,
+            Conversation.wa_contact_id == wa_contact_id,
             WhatsAppChannel.clinic_id == clinic_id,
             WhatsAppChannel.is_active == True,
         )
@@ -542,6 +544,7 @@ async def whatsapp_send_message(
             clinic_id=channel.clinic_id,
             whatsapp_channel_id=channel.id,
             wa_contact_id=data.recipient,
+            contact_name=contact_names.get(wa_contact_id),
             status="OPEN",
             last_message_at=datetime.now(timezone.utc),
         )
