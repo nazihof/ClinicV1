@@ -510,12 +510,15 @@ async def whatsapp_webhook_receive(
 @app.post("/whatsapp/send")
 async def whatsapp_send_message(
     data: WhatsAppSendRequest,
+    request:Request,
     db: Session = Depends(get_db),
 ):
+    clinic_id = int(request.state.user["clinic_id"])
     # 1. Find the WhatsApp channel / clinic
     channel = db.scalar(
         select(WhatsAppChannel).where(
             WhatsAppChannel.phone_number_id == data.phone_number_id,
+            WhatsAppChannel.clinic_id == clinic_id,
             WhatsAppChannel.is_active == True,
         )
     )
