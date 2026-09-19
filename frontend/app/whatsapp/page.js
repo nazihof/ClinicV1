@@ -7,12 +7,20 @@ const API =
   (typeof window !== "undefined"
     ? `http://${window.location.hostname}:8000`
     : "http://localhost:8000");
-    
+
 export default function WhatsAppPage() {
+
+  // 1) PUT ALL useState LINES HERE
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [selectedConversation, setSelectedConversation] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+
+
+  // 2) KEEP YOUR EXISTING useEffect HERE
   useEffect(() => {
     async function loadConversations() {
       const token =
@@ -44,8 +52,11 @@ export default function WhatsAppPage() {
 
         const data = await response.json();
         setConversations(data);
+
       } catch (err) {
-        setError(err.message || "Failed to load conversations");
+        setError(
+          err.message || "Failed to load conversations"
+        );
       } finally {
         setLoading(false);
       }
@@ -54,8 +65,53 @@ export default function WhatsAppPage() {
     loadConversations();
   }, []);
 
+
+  // 3) PUT openConversation HERE
+  // AFTER useEffect, BUT BEFORE return(...)
+  async function openConversation(conversation) {
+    setSelectedConversation(conversation);
+    setMessagesLoading(true);
+
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("clinic_token")
+        : null;
+
+    try {
+      const response = await fetch(
+        `${API}/whatsapp/conversations/${conversation.id}/messages`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to load messages (${response.status})`
+        );
+      }
+
+      const data = await response.json();
+      setMessages(data);
+
+    } catch (err) {
+      console.error(err);
+
+    } finally {
+      setMessagesLoading(false);
+    }
+  }
+
+
+  // 4) YOUR EXISTING LOADING / ERROR CHECKS
   if (loading) {
-    return <div style={{ padding: 24 }}>Loading conversations...</div>;
+    return (
+      <div style={{ padding: 24 }}>
+        Loading conversations...
+      </div>
+    );
   }
 
   if (error) {
@@ -66,21 +122,32 @@ export default function WhatsAppPage() {
     );
   }
 
+
+  // 5) MAIN PAGE OUTPUT
   return (
     <div style={{ padding: 24 }}>
+
       <h1>WhatsApp Conversations</h1>
 
+      {/* CONVERSATION LIST */}
       {conversations.length === 0 ? (
         <p>No WhatsApp conversations yet.</p>
       ) : (
         conversations.map((conversation) => (
+
+          // 6) REPLACE YOUR OLD conversation DIV
+          // WITH THIS CLICKABLE ONE
           <div
             key={conversation.id}
+            onClick={() =>
+              openConversation(conversation)
+            }
             style={{
               border: "1px solid #ddd",
               borderRadius: 8,
               padding: 16,
               marginBottom: 12,
+              cursor: "pointer",
             }}
           >
             <strong>
@@ -88,14 +155,83 @@ export default function WhatsAppPage() {
                 conversation.wa_contact_id}
             </strong>
 
-            <div>{conversation.wa_contact_id}</div>
+            <div>
+              {conversation.wa_contact_id}
+            </div>
 
             <div>
               Status: {conversation.status}
             </div>
           </div>
+
         ))
       )}
+
+
+      {/* 7) PUT MESSAGE HISTORY HERE */}
+      {/* AFTER THE CONVERSATION LIST */}
+      {selectedConversation && (
+        <div
+          style={{
+            marginTop: 30,
+            borderTop: "1px solid #ddd",
+            paddingTop: 20,
+          }}
+        >
+          <h2>
+            Conversation with{" "}
+            {selectedConversation.contact_name ||
+              selectedConversation.wa_contact_id}
+          </h2>
+
+          {messagesLoading ? (
+            <p>Loading messages...</p>
+
+          ) : messages.length === 0 ? (
+            <p>No messages yet.</p>
+
+          ) : (
+            messages.map((message) => (
+              <div
+                key={message.id}
+                style={{
+                  marginBottom: 12,
+                  padding: 12,
+                  borderRadius: 8,
+                  border: "1px solid #ddd",
+                  maxWidth: "70%",
+                  marginLeft:
+                    message.direction === "OUTBOUND"
+                      ? "auto"
+                      : "0",
+                }}
+              >
+                <div>
+                  <strong>
+                    {message.direction}
+                  </strong>
+                </div>
+
+                <div>
+                  {message.body ||
+                    `[${message.message_type}]`}
+                </div>
+
+                <div
+                  style={{
+                    fontSize: 12,
+                    marginTop: 5,
+                    opacity: 0.7,
+                  }}
+                >
+                  {message.status}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
     </div>
   );
 }
