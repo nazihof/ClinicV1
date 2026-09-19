@@ -192,7 +192,60 @@ export default function WhatsAppPage() {
     <div style={{ padding: 24 }}>
 
       <h1>WhatsApp Conversations</h1>
+      {selectedConversation && (
+  <div
+    style={{
+      marginTop: 30,
+      borderTop: "1px solid #ddd",
+      paddingTop: 20,
+    }}
+  >
+    <h2>
+      Conversation with{" "}
+      {selectedConversation.contact_name ||
+        selectedConversation.wa_contact_id}
+    </h2>
 
+    {messagesLoading ? (
+      <p>Loading messages...</p>
+    ) : messages.length === 0 ? (
+      <p>No messages yet.</p>
+    ) : (
+      messages.map((message) => (
+        <div
+          key={message.id}
+          style={{
+            marginBottom: 12,
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #ddd",
+            maxWidth: "70%",
+            marginLeft:
+              message.direction === "OUTBOUND"
+                ? "auto"
+                : "0",
+          }}
+        >
+          <div>
+            <strong>{message.direction}</strong>
+          </div>
+
+          <div>{message.body || `[${message.message_type}]`}</div>
+
+          <div
+            style={{
+              fontSize: 12,
+              marginTop: 5,
+              opacity: 0.7,
+            }}
+          >
+            {message.status}
+          </div>
+        </div>
+      ))
+    )}
+  </div>
+)}
       {/* CONVERSATION LIST */}
       {conversations.length === 0 ? (
         <p>No WhatsApp conversations yet.</p>
