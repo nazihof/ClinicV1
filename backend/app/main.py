@@ -519,7 +519,7 @@ async def whatsapp_send_message(
     channel = db.scalar(
         select(WhatsAppChannel).where(
             WhatsAppChannel.phone_number_id == data.phone_number_id,
-            Conversation.wa_contact_id == wa_contact_id,
+            Conversation.wa_contact_id == data.recipient,
             WhatsAppChannel.clinic_id == clinic_id,
             WhatsAppChannel.is_active == True,
         )
