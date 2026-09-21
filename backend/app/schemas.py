@@ -33,7 +33,11 @@ class WhatsAppMessageOut(BaseModel):
     provider_timestamp: datetime | None = None
     created_at: datetime
 
-
+class WhatsAppTemplateSendRequest(BaseModel):
+    phone_number_id: str
+    recipient: str
+    template_name: str
+    language_code: str = "en_US"
 
 class ClinicCreate(BaseModel):
     name: str

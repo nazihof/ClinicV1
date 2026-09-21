@@ -93,7 +93,53 @@ async def send_whatsapp_text(
         )
 
     return response.json()
+async def send_whatsapp_template(
+    phone_number_id: str,
+    recipient: str,
+    template_name: str,
+    language_code: str = "en_US",
+):
+    access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
+    if not access_token:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN is not configured")
+
+    url = (
+        f"https://graph.facebook.com/v23.0/"
+        f"{phone_number_id}/messages"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": recipient,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {
+                "code": language_code
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            url,
+            headers=headers,
+            json=payload,
+        )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"WhatsApp API error "
+            f"{response.status_code}: {response.text}"
+        )
+
+    return response.json()
 # Sprint 4.5C: pilot-grade abuse protection. This is intentionally simple and
 # process-local; for horizontally scaled production use Redis or an API gateway.
 _RATE_BUCKETS = defaultdict(deque)
@@ -507,7 +553,46 @@ async def whatsapp_webhook_receive(
 
     return {"status": "ok"}
 
+@app.post("/whatsapp/send-template")
+async def whatsapp_send_template(
+    data: WhatsAppTemplateSendRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(request.state.user["clinic_id"])
 
+    channel = db.scalar(
+        select(WhatsAppChannel).where(
+            WhatsAppChannel.phone_number_id == data.phone_number_id,
+            WhatsAppChannel.clinic_id == clinic_id,
+            WhatsAppChannel.is_active == True,
+        )
+    )
+
+    if not channel:
+        raise HTTPException(
+            status_code=404,
+            detail="WhatsApp channel not found",
+        )
+
+    try:
+        result = await send_whatsapp_template(
+            phone_number_id=data.phone_number_id,
+            recipient=data.recipient,
+            template_name=data.template_name,
+            language_code=data.language_code,
+        )
+
+        return {
+            "status": "sent",
+            "provider_response": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
 @app.post("/whatsapp/send")
 async def whatsapp_send_message(
     data: WhatsAppSendRequest,
