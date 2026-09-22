@@ -64,6 +64,105 @@ def appointment_view(a: Appointment):
     )
 
 
+def get_due_reminder_type(
+    appointment: Appointment,
+    existing_event_types: set[str],
+    now: datetime,
+) -> str | None:
+    blocked_statuses = {
+        AppointmentStatus.CANCELLED,
+        AppointmentStatus.COMPLETED,
+        AppointmentStatus.NO_SHOW,
+    }
+
+    if appointment.status in blocked_statuses:
+        return None
+
+    time_until = appointment.start_at - now
+
+    # Appointment already started/passed
+    if time_until <= timedelta(0):
+        return None
+
+    # 48-hour reminder window:
+    # due when appointment is within 48h, but not yet within 24h
+    if (
+        timedelta(hours=24) < time_until <= timedelta(hours=48)
+        and "REMINDER_48H_SENT" not in existing_event_types
+    ):
+        return "REMINDER_48H"
+
+    # 24-hour reminder window
+    if (
+        timedelta(0) < time_until <= timedelta(hours=24)
+        and "REMINDER_24H_SENT" not in existing_event_types
+    ):
+        return "REMINDER_24H"
+
+    return None
+def check_appointment_reminder(
+    appointment: Appointment,
+    existing_event_types: set[str],
+) -> str | None:
+    now = datetime.utcnow()
+
+    reminder_type = get_due_reminder_type(
+        appointment,
+        existing_event_types,
+        now,
+    )
+
+    return reminder_type
+
+def get_upcoming_reminders(
+    db: Session,
+) -> list[dict]:
+    now = datetime.utcnow()
+    horizon = now + timedelta(hours=48)
+
+    appointments = db.scalars(
+        select(Appointment)
+        .where(
+            Appointment.start_at > now,
+            Appointment.start_at <= horizon,
+        )
+        .order_by(Appointment.start_at.asc())
+    ).all()
+
+    results = []
+
+    for appointment in appointments:
+        events = db.scalars(
+            select(AppointmentEvent).where(
+                AppointmentEvent.appointment_id == appointment.id
+            )
+        ).all()
+
+        existing_event_types = {
+            event.event_type
+            for event in events
+        }
+
+        reminder_type = get_due_reminder_type(
+            appointment,
+            existing_event_types,
+            now,
+        )
+
+        if reminder_type:
+            results.append(
+                {
+                    "appointment_id": appointment.id,
+                    "clinic_id": appointment.clinic_id,
+                    "patient_id": appointment.patient_id,
+                    "doctor_id": appointment.doctor_id,
+                    "start_at": appointment.start_at,
+                    "status": appointment.status.value,
+                    "reminder_type": reminder_type,
+                }
+            )
+
+    return results
 PUBLIC_PATHS={"/health","/ready","/auth/status","/auth/setup-clinics","/auth/setup","/auth/login","/docs","/openapi.json","/redoc","/whatsapp/webhook"}
 
 def _deny(detail="Access denied", status=403):
@@ -723,7 +822,7 @@ async def whatsapp_send_message(
 
     except Exception as exc:
         db.rollback()
-        
+
         print(
             "WHATSAPP SEND ERROR:",
             type(exc).__name__,
@@ -735,6 +834,21 @@ async def whatsapp_send_message(
             detail=str(exc),
         )
 
+
+@app.get("/reminders/due")
+def list_due_reminders(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(request.state.user["clinic_id"])
+
+    reminders = get_upcoming_reminders(db)
+
+    return [
+        reminder
+        for reminder in reminders
+        if reminder["clinic_id"] == clinic_id
+    ]
 
 async def whatsapp_send_message(
     data: WhatsAppSendRequest,
@@ -756,6 +870,7 @@ async def whatsapp_send_message(
             status_code=502,
             detail=str(exc),
         )
+
 @app.get(
     "/whatsapp/conversations",
     response_model=list[WhatsAppConversationOut],
