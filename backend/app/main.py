@@ -497,6 +497,10 @@ async def whatsapp_webhook_receive(
                 )
 
                 if existing_message:
+                    print(
+                    f"WHATSAPP DUPLICATE IGNORED "
+                    f"message_id={provider_message_id}"
+                    )
                     continue
 
                 conversation = db.scalar(
@@ -570,7 +574,12 @@ async def whatsapp_webhook_receive(
 
     except Exception as exc:
         db.rollback()
-        print("WHATSAPP WEBHOOK ERROR:", repr(exc))
+
+        print(
+            "WHATSAPP WEBHOOK ERROR:",
+            type(exc).__name__,
+            str(exc),
+        )
 
         # For now expose the failure while testing.
         raise HTTPException(
@@ -714,6 +723,12 @@ async def whatsapp_send_message(
 
     except Exception as exc:
         db.rollback()
+        
+        print(
+            "WHATSAPP SEND ERROR:",
+            type(exc).__name__,
+            str(exc),
+        )
 
         raise HTTPException(
             status_code=502,
