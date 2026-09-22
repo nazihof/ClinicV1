@@ -167,11 +167,17 @@ export default function WhatsAppPage() {
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
 
+    if (response.status === 409) {
       throw new Error(
-        errorData.detail ||
-          `Failed to send message (${response.status})`
+        "The WhatsApp 24-hour conversation window is closed. Send an approved template message instead."
       );
     }
+
+    throw new Error(
+      errorData.detail ||
+        `Failed to send message (${response.status})`
+    );
+  }
 
     setReplyText("");
 
