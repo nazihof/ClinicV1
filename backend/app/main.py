@@ -24,6 +24,33 @@ app = FastAPI(title="Clinic Front-Desk Intelligence", version="4.5.4-pilot.1")
 
 
 
+def whatsapp_window_is_open(
+    db: Session,
+    conversation_id: int,
+) -> bool:
+    last_inbound = db.scalar(
+        select(Message)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.direction == "INBOUND",
+        )
+        .order_by(Message.provider_timestamp.desc())
+        .limit(1)
+    )
+
+    if not last_inbound:
+        return False
+
+    timestamp = (
+        last_inbound.provider_timestamp
+        or last_inbound.created_at
+    )
+
+    if not timestamp:
+        return False
+
+    return datetime.now(timezone.utc) - timestamp <= timedelta(hours=24)
+
 def event(db, appointment_id, event_type, details=None):
     db.add(AppointmentEvent(appointment_id=appointment_id, event_type=event_type, details=details))
 
@@ -636,6 +663,11 @@ async def whatsapp_send_message(
 
         db.add(conversation)
         db.flush()
+    if not whatsapp_window_is_open(db, conversation.id):
+        raise HTTPException(
+        status_code=409,
+        detail="WhatsApp 24-hour window is closed. Use an approved template message.",
+        )
 
     try:
         # 3. Send message through Meta
