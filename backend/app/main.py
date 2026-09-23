@@ -226,6 +226,7 @@ async def send_whatsapp_template(
     phone_number_id: str,
     recipient: str,
     template_name: str,
+    parameters: list[str],
     language_code: str = "en_US",
 ):
     access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -248,10 +249,22 @@ async def send_whatsapp_template(
         "to": recipient,
         "type": "template",
         "template": {
-            "name": template_name,
-            "language": {
-                "code": language_code
-            },
+        "name": template_name,
+        "language": {
+            "code": language_code
+        },
+        "components": [
+            {
+                "type": "body",
+                "parameters": [
+                    {
+                        "type": "text",
+                        "text": value,
+                    }
+                    for value in parameters
+                    ],
+                }
+            ],
         },
     }
 
@@ -718,6 +731,7 @@ async def whatsapp_send_template(
             phone_number_id=data.phone_number_id,
             recipient=data.recipient,
             template_name=data.template_name,
+            parameters=data.parameters,
             language_code=data.language_code,
         )
 

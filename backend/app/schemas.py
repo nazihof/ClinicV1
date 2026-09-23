@@ -37,6 +37,7 @@ class WhatsAppTemplateSendRequest(BaseModel):
     phone_number_id: str
     recipient: str
     template_name: str
+    parameters: list[str] = []
     language_code: str = "en_US"
 
 class ClinicCreate(BaseModel):
