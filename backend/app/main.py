@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, date,timezone,time
+from zoneinfo import ZoneInfo
 import os
 import time as pytime
 import hashlib
@@ -104,7 +105,8 @@ def check_appointment_reminder(
     appointment: Appointment,
     existing_event_types: set[str],
 ) -> str | None:
-    now = datetime.utcnow()
+    now = datetime.now(
+    ZoneInfo("Asia/Beirut")).replace(tzinfo=None)
 
     reminder_type = get_due_reminder_type(
         appointment,
@@ -117,7 +119,8 @@ def check_appointment_reminder(
 def get_upcoming_reminders(
     db: Session,
 ) -> list[dict]:
-    now = datetime.utcnow()
+    now = datetime.now(
+    ZoneInfo("Asia/Beirut")).replace(tzinfo=None)
     horizon = now + timedelta(hours=48)
 
     appointments = db.scalars(
