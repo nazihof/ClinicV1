@@ -868,8 +868,63 @@ async def whatsapp_webhook_receive(
 
                 if message_type == "text":
                     body = incoming.get("text", {}).get("body")
+                    if message_type == "text" and body:
+                        normalized = body.strip().upper()
 
-                message = Message(
+                    action_map = {
+                        "CONFIRM": "CONFIRM",
+                        "YES": "CONFIRM",
+                        "CANCEL": "CANCEL",
+                        "RESCHEDULE": "RESCHEDULE",
+                    }
+
+                    action = action_map.get(normalized)
+
+                if action:
+                    # Find the latest active appointment for this patient
+                        patient = db.scalar(
+                        select(Patient).where(
+                        Patient.clinic_id == channel.clinic_id,
+                        Patient.phone == wa_contact_id,
+                    )
+                    )
+
+                if patient:
+                    appointment = db.scalar(
+                    select(Appointment)
+                    .where(
+                        Appointment.clinic_id == channel.clinic_id,
+                        Appointment.patient_id == patient.id,
+                        Appointment.status.in_(
+                            [
+                                AppointmentStatus.PENDING,
+                                AppointmentStatus.CONFIRMED,
+                            ]
+                        ),
+                    )
+                    .order_by(Appointment.start_at.asc())
+                )
+
+                    if appointment:
+                        try:
+                            event_type = apply_patient_confirmation_action(
+                            db=db,
+                            appointment=appointment,
+                            action=action,
+                            )
+
+                            print(
+                                f"WHATSAPP PATIENT ACTION "
+                                f"appointment={appointment.id} "
+                                f"action={action} "
+                                f"event={event_type}"
+                                )
+                        except ValueError as exc:
+                            print(
+                            "WHATSAPP PATIENT ACTION ERROR:",
+                            str(exc),
+                            )
+                    message = Message(
                     clinic_id=channel.clinic_id,
                     conversation_id=conversation.id,
                     provider_message_id=provider_message_id,
@@ -889,7 +944,7 @@ async def whatsapp_webhook_receive(
                     f"type={message_type}"
                 )
 
-        db.commit()
+            db.commit()
 
     except Exception as exc:
         db.rollback()
