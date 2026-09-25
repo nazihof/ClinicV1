@@ -282,6 +282,174 @@ async def send_whatsapp_template(
         )
 
     return response.json()
+
+
+async def send_due_reminders(
+    db: Session,
+    clinic_id: int,
+) -> list[dict]:
+    due_reminders = get_upcoming_reminders(db)
+
+    results = []
+
+    for reminder in due_reminders:
+        # Only process this clinic
+        if reminder["clinic_id"] != clinic_id:
+            continue
+
+        appointment = db.get(
+            Appointment,
+            reminder["appointment_id"],
+        )
+
+        if not appointment:
+            continue
+
+        patient = db.get(
+            Patient,
+            appointment.patient_id,
+        )
+
+        doctor = db.get(
+            Doctor,
+            appointment.doctor_id,
+        )
+
+        clinic = db.get(
+            Clinic,
+            appointment.clinic_id,
+        )
+
+        if not patient or not doctor or not clinic:
+            continue
+
+        # Find this clinic's active WhatsApp channel
+        channel = db.scalar(
+            select(WhatsAppChannel).where(
+                WhatsAppChannel.clinic_id == clinic_id,
+                WhatsAppChannel.is_active == True,
+            )
+        )
+
+        if not channel:
+            results.append(
+                {
+                    "appointment_id": appointment.id,
+                    "status": "failed",
+                    "error": "No active WhatsApp channel",
+                }
+            )
+            continue
+
+        reminder_type = reminder["reminder_type"]
+
+        template_name = reminder_template_name(
+            reminder_type
+        )
+
+        parameters = [
+            patient.full_name,
+            doctor.name,
+            appointment.start_at.strftime("%d %B %Y"),
+            appointment.start_at.strftime("%I:%M %p"),
+            clinic.name,
+        ]
+
+        # Remove +, spaces, dashes, etc.
+        recipient = "".join(
+            ch for ch in patient.phone
+            if ch.isdigit()
+        )
+
+        try:
+            provider_result = await send_whatsapp_template(
+                phone_number_id=channel.phone_number_id,
+                recipient=recipient,
+                template_name=template_name,
+                parameters=parameters,
+                language_code="en_US",
+            )
+
+            provider_message_id = None
+
+            messages = provider_result.get(
+                "messages",
+                [],
+            )
+
+            if messages:
+                provider_message_id = messages[0].get(
+                    "id"
+                )
+
+            event_type = (
+                "REMINDER_48H_SENT"
+                if reminder_type == "REMINDER_48H"
+                else "REMINDER_24H_SENT"
+            )
+
+            event = AppointmentEvent(
+                appointment_id=appointment.id,
+                event_type=event_type,
+                details=(
+                    f"WhatsApp template={template_name}; "
+                    f"provider_message_id="
+                    f"{provider_message_id or 'unknown'}"
+                ),
+            )
+
+            db.add(event)
+            db.commit()
+
+            results.append(
+                {
+                    "appointment_id": appointment.id,
+                    "reminder_type": reminder_type,
+                    "status": "sent",
+                    "provider_message_id":
+                        provider_message_id,
+                }
+            )
+
+        except Exception as exc:
+            db.rollback()
+
+            failure_event = AppointmentEvent(
+                appointment_id=appointment.id,
+                event_type="REMINDER_FAILED",
+                details=(
+                    f"{reminder_type}: "
+                    f"{type(exc).__name__}: {str(exc)}"
+                ),
+            )
+
+            db.add(failure_event)
+            db.commit()
+
+            results.append(
+                {
+                    "appointment_id": appointment.id,
+                    "reminder_type": reminder_type,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+
+    return results
+
+@app.post("/reminders/send-due")
+async def send_due_reminders_endpoint(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(
+        request.state.user["clinic_id"]
+    )
+
+    return await send_due_reminders(
+        db,
+        clinic_id,
+    )
 # Sprint 4.5C: pilot-grade abuse protection. This is intentionally simple and
 # process-local; for horizontally scaled production use Redis or an API gateway.
 _RATE_BUCKETS = defaultdict(deque)
@@ -1385,6 +1553,44 @@ def dashboard_summary(clinic_id:int, day:date, doctor_id:int|None=None, db:Sessi
     db.commit()
     return {"total":len(appts),"counts":counts,"risk_counts":risk_counts,"attention":queue["items"][:12],"attention_counts":queue["counts"]}
 
+def reminder_template_name(reminder_type: str) -> str:
+    mapping = {
+        "REMINDER_48H": "appointment_reminder_48h",
+        "REMINDER_24H": "appointment_reminder_24h",
+    }
+
+    template_name = mapping.get(reminder_type)
+
+    if not template_name:
+        raise ValueError(
+            f"Unsupported reminder type: {reminder_type}"
+        )
+
+    return template_name
+
+def build_reminder_parameters(
+    appointment: Appointment,
+) -> list[str]:
+    patient_name = appointment.patient.full_name
+    doctor_name = appointment.doctor.name
+
+    appointment_date = appointment.start_at.strftime(
+        "%d %B %Y"
+    )
+
+    appointment_time = appointment.start_at.strftime(
+        "%I:%M %p"
+    )
+
+    clinic_name = "Clinic FrontDesk"
+
+    return [
+        patient_name,
+        doctor_name,
+        appointment_date,
+        appointment_time,
+        clinic_name,
+    ]
 
 @app.get("/dashboard/operational")
 def operational_dashboard(
