@@ -5,6 +5,8 @@ from .models import AppointmentStatus
 class ORM(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+class PatientAppointmentResponse(BaseModel):
+    action: str
 
 class WhatsAppSendRequest(BaseModel):
     phone_number_id: str

@@ -487,6 +487,42 @@ def _apply_security_headers(response, request: Request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
+
+def apply_patient_confirmation_action(
+    db: Session,
+    appointment: Appointment,
+    action: str,
+) -> str:
+    action = action.strip().upper()
+
+    if action == "CONFIRM":
+        appointment.status = AppointmentStatus.CONFIRMED
+        event_type = "PATIENT_CONFIRMED"
+
+    elif action == "CANCEL":
+        appointment.status = AppointmentStatus.CANCELLED
+        event_type = "PATIENT_CANCELLED"
+
+    elif action == "RESCHEDULE":
+        event_type = "RESCHEDULE_REQUESTED"
+
+    else:
+        raise ValueError(
+            f"Unsupported confirmation action: {action}"
+        )
+
+    event = AppointmentEvent(
+        appointment_id=appointment.id,
+        event_type=event_type,
+        details=f"Patient action: {action}",
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(appointment)
+
+    return event_type
+
 def _write_audit(request: Request, response):
     path = request.url.path
     user_state = getattr(request.state, "user", None)
@@ -1553,6 +1589,48 @@ def dashboard_summary(clinic_id:int, day:date, doctor_id:int|None=None, db:Sessi
     db.commit()
     return {"total":len(appts),"counts":counts,"risk_counts":risk_counts,"attention":queue["items"][:12],"attention_counts":queue["counts"]}
 
+
+@app.post("/appointments/{appointment_id}/patient-response")
+def patient_appointment_response(
+    appointment_id: int,
+    body: PatientAppointmentResponse,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(request.state.user["clinic_id"])
+
+    appointment = db.scalar(
+        select(Appointment).where(
+            Appointment.id == appointment_id,
+            Appointment.clinic_id == clinic_id,
+        )
+    )
+
+    if not appointment:
+        raise HTTPException(
+            status_code=404,
+            detail="Appointment not found",
+        )
+
+    try:
+        event_type = apply_patient_confirmation_action(
+            db=db,
+            appointment=appointment,
+            action=body.action,
+        )
+
+        return {
+            "appointment_id": appointment.id,
+            "status": appointment.status.value,
+            "event_type": event_type,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
 def reminder_template_name(reminder_type: str) -> str:
     mapping = {
         "REMINDER_48H": "appointment_reminder_48h",
@@ -1567,6 +1645,9 @@ def reminder_template_name(reminder_type: str) -> str:
         )
 
     return template_name
+
+
+
 
 def build_reminder_parameters(
     appointment: Appointment,
