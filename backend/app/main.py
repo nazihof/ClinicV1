@@ -597,7 +597,8 @@ async def security_rate_limit_and_audit(request: Request, call_next):
 
     response = await call_next(request)
     _write_audit(request, response)
-
+    _apply_security_headers(response, request)
+    return response
 
 @app.middleware("http")
 async def authentication_gate(request:Request, call_next):
