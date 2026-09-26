@@ -909,7 +909,7 @@ async def whatsapp_webhook_receive(
 
                 if action:
                     # Find the latest active appointment for this patient
-                        patient = db.scalar(
+                        patient = db.scalars(
                         select(Patient).where(
                         Patient.clinic_id == channel.clinic_id,
                         #Patient.phone == wa_contact_id,
