@@ -559,29 +559,44 @@ def _write_audit(request: Request, response):
 
 async def security_rate_limit_and_audit(request: Request, call_next):
     ip = _client_ip(request)
-   
+
     # Public webhook endpoint for Meta verification/events
     if request.url.path == "/whatsapp/webhook":
-    	response = await call_next(request)
-    return _apply_security_headers(response, request)
+        response = await call_next(request)
+        return _apply_security_headers(response, request)
 
-# existing authentication logic continues below
-   # if not user:
-    #	return _deny("Authentication required", 401)
+    # existing authentication logic continues below
+    # if not user:
+    #     return _deny("Authentication required", 401)
 
     if request.url.path == "/auth/login" and request.method == "POST":
-        if _limited(f"login:{ip}", int(os.getenv("LOGIN_RATE_LIMIT", "8")), 60):
-            response = _deny("Too many login attempts. Try again shortly.", 429)
+        if _limited(
+            f"login:{ip}",
+            int(os.getenv("LOGIN_RATE_LIMIT", "8")),
+            60,
+        ):
+            response = _deny(
+                "Too many login attempts. Try again shortly.",
+                429,
+            )
             response.headers["Retry-After"] = "60"
             return _apply_security_headers(response, request)
+
     if request.url.path == "/auth/setup" and request.method == "POST":
-        if _limited(f"setup:{ip}", 5, 300):
-            response = _deny("Too many setup attempts. Try again later.", 429)
+        if _limited(
+            f"setup:{ip}",
+            5,
+            300,
+        ):
+            response = _deny(
+                "Too many setup attempts. Try again later.",
+                429,
+            )
             response.headers["Retry-After"] = "300"
             return _apply_security_headers(response, request)
+
     response = await call_next(request)
     _write_audit(request, response)
-    return _apply_security_headers(response, request)
 
 
 @app.middleware("http")
