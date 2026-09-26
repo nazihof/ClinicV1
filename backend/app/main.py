@@ -5,6 +5,7 @@ import time as pytime
 import hashlib
 import hmac
 import httpx
+import traceback
 from collections import defaultdict, deque
 from threading import Lock
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
@@ -988,6 +989,7 @@ async def whatsapp_webhook_receive(
             type(exc).__name__,
             str(exc),
         )
+        traceback.print_exc()
 
         # For now expose the failure while testing.
         raise HTTPException(
