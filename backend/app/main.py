@@ -556,13 +556,14 @@ def _write_audit(request: Request, response):
         print(f"AUDIT_LOG_WRITE_FAILED: {exc}")
 
 @app.middleware("http")
+
 async def security_rate_limit_and_audit(request: Request, call_next):
     ip = _client_ip(request)
    
     # Public webhook endpoint for Meta verification/events
     if request.url.path == "/whatsapp/webhook":
     	response = await call_next(request)
-    	return _apply_security_headers(response, request)
+    return _apply_security_headers(response, request)
 
 # existing authentication logic continues below
    # if not user:
@@ -936,7 +937,7 @@ async def whatsapp_webhook_receive(
                                 f"action={action} "
                                 f"event={event_type}"
                                 )
-                        except ValueError as exc:
+                    except ValueError as exc:
                             print(
                             "WHATSAPP PATIENT ACTION ERROR:",
                             str(exc),
