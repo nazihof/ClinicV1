@@ -55,6 +55,16 @@ def whatsapp_window_is_open(
 def event(db, appointment_id, event_type, details=None):
     db.add(AppointmentEvent(appointment_id=appointment_id, event_type=event_type, details=details))
 
+def normalize_phone(phone: str | None) -> str:
+    if not phone:
+        return ""
+
+    return "".join(
+        ch for ch in phone
+        if ch.isdigit()
+    )
+
+
 def appointment_view(a: Appointment):
     return AppointmentView(
         id=a.id, clinic_id=a.clinic_id, doctor_id=a.doctor_id, patient_id=a.patient_id, service_id=a.service_id,
@@ -885,9 +895,9 @@ async def whatsapp_webhook_receive(
                         patient = db.scalar(
                         select(Patient).where(
                         Patient.clinic_id == channel.clinic_id,
-                        Patient.phone == wa_contact_id,
+                        #Patient.phone == wa_contact_id,
                     )
-                    )
+                    ).all()
 
                 if patient:
                     appointment = db.scalar(
@@ -904,9 +914,16 @@ async def whatsapp_webhook_receive(
                     )
                     .order_by(Appointment.start_at.asc())
                 )
-
-                    if appointment:
-                        try:
+                patient = next(
+                    (
+                        p for p in patients
+                            if normalize_phone(p.phone)
+                            == normalize_phone(wa_contact_id)
+                    ),
+                        None,
+                            )
+                if appointment:
+                    try:
                             event_type = apply_patient_confirmation_action(
                             db=db,
                             appointment=appointment,
