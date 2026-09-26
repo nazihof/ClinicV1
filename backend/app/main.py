@@ -130,7 +130,7 @@ def get_upcoming_reminders(
     db: Session,
 ) -> list[dict]:
     now = datetime.now(
-    ZoneInfo("Asia/Beirut")).replace(tzinfo=None)
+        ZoneInfo("Asia/Beirut")).replace(tzinfo=None)
     horizon = now + timedelta(hours=48)
 
     appointments = db.scalars(
