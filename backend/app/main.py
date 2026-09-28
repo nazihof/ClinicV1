@@ -944,10 +944,10 @@ async def whatsapp_webhook_receive(
                     AppointmentStatus.PENDING,
                     AppointmentStatus.CONFIRMED,
                 ]
-            ),
-        )
+                    ),
+                    )
                     .order_by(Appointment.start_at.asc())
-    )
+                )
 
                 if appointment:
                     try:
