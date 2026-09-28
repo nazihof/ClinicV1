@@ -917,59 +917,58 @@ async def whatsapp_webhook_receive(
                     )
                     ).all()
 
-                if patient:
-                    appointment = db.scalar(
-                    select(Appointment)
-                    .where(
-                        Appointment.clinic_id == channel.clinic_id,
-                        Appointment.patient_id == patient.id,
-                        Appointment.status.in_(
-                            [
-                                AppointmentStatus.PENDING,
-                                AppointmentStatus.CONFIRMED,
-                            ]
-                        ),
+                patients = db.scalars(
+                    select(Patient).where(
+                    Patient.clinic_id == channel.clinic_id
                     )
-                    .order_by(Appointment.start_at.asc())
-                )
+                ).all()
+
                 patient = next(
-                    (
-                        p for p in patients
-                            if normalize_phone(p.phone)
-                            == normalize_phone(wa_contact_id)
-                    ),
-                        None,
-                            )
+                (
+                p
+                for p in patients
+                    if normalize_phone(p.phone)
+                    == normalize_phone(wa_contact_id)
+                ),
+                None,
+                )
+
+                if patient is not None:
+                    appointment = db.scalar(
+                select(Appointment)
+                .where(
+                    Appointment.clinic_id == channel.clinic_id,
+                    Appointment.patient_id == patient.id,
+                    Appointment.status.in_(
+                [
+                    AppointmentStatus.PENDING,
+                    AppointmentStatus.CONFIRMED,
+                ]
+            ),
+        )
+                    .order_by(Appointment.start_at.asc())
+    )
+
                 if appointment:
                     try:
-                            event_type = apply_patient_confirmation_action(
-                            db=db,
-                            appointment=appointment,
-                            action=action,
+                        event_type = apply_patient_confirmation_action(
+                        db=db,
+                        appointment=appointment,
+                        action=action,
+                    )
+
+                        print(
+                            f"WHATSAPP PATIENT ACTION "
+                            f"appointment={appointment.id} "
+                            f"action={action} "
+                            f"event={event_type}"
                             )
 
-                            print(
-                                f"WHATSAPP PATIENT ACTION "
-                                f"appointment={appointment.id} "
-                                f"action={action} "
-                                f"event={event_type}"
-                                )
                     except ValueError as exc:
-                            print(
+                        print(
                             "WHATSAPP PATIENT ACTION ERROR:",
                             str(exc),
-                            )
-                    message = Message(
-                    clinic_id=channel.clinic_id,
-                    conversation_id=conversation.id,
-                    provider_message_id=provider_message_id,
-                    direction="INBOUND",
-                    message_type=message_type,
-                    body=body,
-                    status="RECEIVED",
-                    provider_timestamp=provider_timestamp,
-                )
-
+                        )
                 db.add(message)
 
                 print(
