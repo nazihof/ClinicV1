@@ -827,151 +827,93 @@ async def whatsapp_webhook_receive(
                 if wa_id:
                     contact_names[wa_id] = profile.get("name")
 
-            messages = value.get("messages", [])
+            message_type = incoming.get("type", "unknown")
+body = None
+action = None
 
-            for incoming in messages:
-                provider_message_id = incoming.get("id")
-                wa_contact_id = incoming.get("from")
+if message_type == "text":
+    body = incoming.get("text", {}).get("body")
 
-                if not provider_message_id or not wa_contact_id:
-                    continue
+    if body:
+        normalized = body.strip().upper()
 
-                existing_message = db.scalar(
-                    select(Message).where(
-                        Message.provider_message_id == provider_message_id,
-                        Message.clinic_id == channel.clinic_id,
-                    )
-                )
+        action_map = {
+            "CONFIRM": "CONFIRM",
+            "YES": "CONFIRM",
+            "CANCEL": "CANCEL",
+            "RESCHEDULE": "RESCHEDULE",
+        }
 
-                if existing_message:
-                    print(
-                    f"WHATSAPP DUPLICATE IGNORED "
-                    f"message_id={provider_message_id}"
-                    )
-                    continue
+        action = action_map.get(normalized)
 
-                conversation = db.scalar(
-                    select(Conversation).where(
-                        Conversation.whatsapp_channel_id == channel.id,
-                        Conversation.wa_contact_id == wa_contact_id,
-                    )
-                )
+if action:
+    appointment = None
 
-                timestamp_raw = incoming.get("timestamp")
-                provider_timestamp = None
+    patients = db.scalars(
+        select(Patient).where(
+            Patient.clinic_id == channel.clinic_id
+        )
+    ).all()
 
-                if timestamp_raw:
-                    try:
-                        provider_timestamp = datetime.fromtimestamp(
-                            int(timestamp_raw),
-                            tz=timezone.utc,
-                        )
-                    except (ValueError, TypeError):
-                        pass
+    patient = next(
+        (
+            p
+            for p in patients
+            if normalize_phone(p.phone)
+            == normalize_phone(wa_contact_id)
+        ),
+        None,
+    )
 
-                if not conversation:
-                    conversation = Conversation(
-                        clinic_id=channel.clinic_id,
-                        whatsapp_channel_id=channel.id,
-                        wa_contact_id=wa_contact_id,
-                        contact_name=contact_names.get(wa_contact_id),
-                        status="OPEN",
-                        last_message_at=provider_timestamp,
-                    )
-
-                    db.add(conversation)
-                    db.flush()
-
-                else:
-                    if contact_names.get(wa_contact_id):
-                        conversation.contact_name = contact_names[wa_contact_id]
-
-                    conversation.last_message_at = (
-                        provider_timestamp
-                        or datetime.now(timezone.utc)
-                    )
-
-                message_type = incoming.get("type", "unknown")
-                body = None
-
-                if message_type == "text":
-                    body = incoming.get("text", {}).get("body")
-                    if message_type == "text" and body:
-                        normalized = body.strip().upper()
-
-                    action_map = {
-                        "CONFIRM": "CONFIRM",
-                        "YES": "CONFIRM",
-                        "CANCEL": "CANCEL",
-                        "RESCHEDULE": "RESCHEDULE",
-                    }
-
-                    action = action_map.get(normalized)
-
-                if action:
-                    # Find the latest active appointment for this patient
-                        patient = db.scalars(
-                        select(Patient).where(
-                        Patient.clinic_id == channel.clinic_id,
-                        #Patient.phone == wa_contact_id,
-                    )
-                    ).all()
-                appointment = None
-                patients = db.scalars(
-                    select(Patient).where(
-                    Patient.clinic_id == channel.clinic_id
-                    )
-                ).all()
-
-                patient = next(
-                (
-                p
-                for p in patients
-                    if normalize_phone(p.phone)
-                    == normalize_phone(wa_contact_id)
+    if patient is not None:
+        appointment = db.scalar(
+            select(Appointment)
+            .where(
+                Appointment.clinic_id == channel.clinic_id,
+                Appointment.patient_id == patient.id,
+                Appointment.status.in_(
+                    [
+                        AppointmentStatus.PENDING,
+                        AppointmentStatus.CONFIRMED,
+                    ]
                 ),
-                None,
-                )
+            )
+            .order_by(Appointment.start_at.asc())
+        )
 
-                if patient is not None:
-                    appointment = db.scalar(
-                select(Appointment)
-                .where(
-                    Appointment.clinic_id == channel.clinic_id,
-                    Appointment.patient_id == patient.id,
-                    Appointment.status.in_(
-                [
-                    AppointmentStatus.PENDING,
-                    AppointmentStatus.CONFIRMED,
-                ]
-                    ),
-                    )
-                    .order_by(Appointment.start_at.asc())
-                )
+    if appointment:
+        try:
+            event_type = apply_patient_confirmation_action(
+                db=db,
+                appointment=appointment,
+                action=action,
+            )
 
-                if appointment:
-                    try:
-                        event_type = apply_patient_confirmation_action(
-                        db=db,
-                        appointment=appointment,
-                        action=action,
-                    )
+            print(
+                f"WHATSAPP PATIENT ACTION "
+                f"appointment={appointment.id} "
+                f"action={action} "
+                f"event={event_type}"
+            )
 
-                        print(
-                            f"WHATSAPP PATIENT ACTION "
-                            f"appointment={appointment.id} "
-                            f"action={action} "
-                            f"event={event_type}"
-                            )
+        except ValueError as exc:
+            print(
+                "WHATSAPP PATIENT ACTION ERROR:",
+                str(exc),
+            )
 
-                    except ValueError as exc:
-                        print(
-                            "WHATSAPP PATIENT ACTION ERROR:",
-                            str(exc),
-                        )
-                db.add(message)
-
-                print(
+            message = Message(
+                clinic_id=channel.clinic_id,
+                conversation_id=conversation.id,
+                provider_message_id=provider_message_id,
+                direction="INBOUND",
+                message_type=message_type,
+                body=body,
+                status="RECEIVED",
+                provider_timestamp=provider_timestamp,
+            )
+            db.add(message) 
+            print(
                     f"WHATSAPP STORED clinic={channel.clinic_id} "
                     f"conversation={conversation.id} "
                     f"from={wa_contact_id} "
