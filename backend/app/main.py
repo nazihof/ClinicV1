@@ -916,7 +916,7 @@ async def whatsapp_webhook_receive(
                         #Patient.phone == wa_contact_id,
                     )
                     ).all()
-
+                appointment = None
                 patients = db.scalars(
                     select(Patient).where(
                     Patient.clinic_id == channel.clinic_id
