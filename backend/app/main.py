@@ -177,6 +177,102 @@ def get_upcoming_reminders(
             )
 
     return results
+def get_no_response_followups(
+    db: Session,
+    clinic_id: int,
+) -> list[dict]:
+
+    now_local = datetime.now(
+        ZoneInfo("Asia/Beirut")
+    ).replace(tzinfo=None)
+
+    now_utc = datetime.now(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+    followup_cutoff = now_utc - timedelta(hours=4)
+
+    appointments = db.scalars(
+        select(Appointment)
+        .where(
+            Appointment.clinic_id == clinic_id,
+            Appointment.status == AppointmentStatus.PENDING,
+            Appointment.start_at > now_local,
+        )
+        .order_by(Appointment.start_at.asc())
+    ).all()
+
+    results = []
+
+    response_events = {
+        "PATIENT_CONFIRMED",
+        "PATIENT_CANCELLED",
+        "RESCHEDULE_REQUESTED",
+    }
+
+    for appointment in appointments:
+
+        events = db.scalars(
+            select(AppointmentEvent)
+            .where(
+                AppointmentEvent.appointment_id
+                == appointment.id
+            )
+            .order_by(
+                AppointmentEvent.created_at.asc()
+            )
+        ).all()
+
+        # Patient already responded
+        if any(
+            event.event_type in response_events
+            for event in events
+        ):
+            continue
+
+        # We already handled this no-response case
+        if any(
+            event.event_type
+            == "NO_RESPONSE_FOLLOWUP_DUE"
+            for event in events
+        ):
+            continue
+
+        reminder_24h_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type
+                == "REMINDER_24H_SENT"
+            ),
+            None,
+        )
+
+        if not reminder_24h_event:
+            continue
+
+        if (
+            reminder_24h_event.created_at
+            > followup_cutoff
+        ):
+            continue
+
+        results.append(
+            {
+                "appointment_id": appointment.id,
+                "patient_id": appointment.patient_id,
+                "doctor_id": appointment.doctor_id,
+                "start_at": appointment.start_at,
+                "status": appointment.status.value,
+                "reminder_sent_at":
+                    reminder_24h_event.created_at,
+                "followup_reason":
+                    "No response after 24h reminder",
+            }
+        )
+
+    return results
+
 PUBLIC_PATHS={"/health","/ready","/auth/status","/auth/setup-clinics","/auth/setup","/auth/login","/docs","/openapi.json","/redoc","/whatsapp/webhook"}
 
 def _deny(detail="Access denied", status=403):
@@ -1157,6 +1253,19 @@ def list_due_reminders(
         if reminder["clinic_id"] == clinic_id
     ]
 
+@app.get("/reminders/no-response-due")
+def no_response_followups_due(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(
+        request.state.user["clinic_id"]
+    )
+
+    return get_no_response_followups(
+        db,
+        clinic_id,
+    )
 @app.get(
     "/whatsapp/conversations",
     response_model=list[WhatsAppConversationOut],
