@@ -224,7 +224,19 @@ def get_no_response_followups(
     }
 
     for appointment in appointments:
+        risk = calculate_appointment_risk(
+            db,
+            appointment,
+            persist=False,
+        )
 
+        risk_score = risk["score"]
+        risk_level = risk["level"]
+
+        # Only high-risk appointments receive
+        # the extra no-response follow-up
+        if risk_level != "HIGH":
+            continue    
         events = db.scalars(
             select(AppointmentEvent)
             .where(
@@ -283,6 +295,8 @@ def get_no_response_followups(
                     reminder_24h_event.created_at,
                 "followup_reason":
                     "No response after 24h reminder",
+                "risk_score": risk_score,
+                "risk_level": risk_level,
             }
         )
 
