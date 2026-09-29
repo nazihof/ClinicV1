@@ -2,7 +2,7 @@ import os
 os.environ['DATABASE_URL'] = 'sqlite:///./test_clinic.db'
 from datetime import datetime, time
 from fastapi.testclient import TestClient
-from app.main import app
+from backend.app.mainold import app
 
 client = TestClient(app)
 

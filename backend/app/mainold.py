@@ -710,6 +710,7 @@ async def whatsapp_webhook_receive(
         )
 
     raw_body = await request.body()
+
     signature_header = request.headers.get("X-Hub-Signature-256")
 
     if not signature_header:
@@ -725,7 +726,10 @@ async def whatsapp_webhook_receive(
         hashlib.sha256,
     ).hexdigest()
 
-    if not hmac.compare_digest(signature_header, expected_signature):
+    if not hmac.compare_digest(
+        signature_header,
+        expected_signature,
+    ):
         print("WHATSAPP SIGNATURE CHECK: INVALID")
         raise HTTPException(
             status_code=401,
@@ -742,251 +746,193 @@ async def whatsapp_webhook_receive(
 
             for change in changes:
                 value = change.get("value", {})
+		# -------------------------------------------------
+		# Process WhatsApp delivery/read status updates
+		# -------------------------------------------------
 
-                # -------------------------------------------------
-                # Process WhatsApp delivery/read status updates
-                # -------------------------------------------------
                 statuses = value.get("statuses", [])
 
-                for status_item in statuses:
-                    provider_message_id = status_item.get("id")
-                    meta_status = status_item.get("status")
+            for status_item in statuses:
+                provider_message_id = status_item.get("id")
+                meta_status = status_item.get("status")
 
-                    if not provider_message_id or not meta_status:
-                        continue
-
-                    message = db.scalar(
-                        select(Message).where(
-                            Message.provider_message_id == provider_message_id
-                        )
-                    )
-
-                    if not message:
-                        print(
-                            "WHATSAPP STATUS: message not found:",
-                            provider_message_id,
-                        )
-                        continue
-
-                    status_map = {
-                        "sent": "SENT",
-                        "delivered": "DELIVERED",
-                        "read": "READ",
-                        "failed": "FAILED",
-                    }
-                    new_status = status_map.get(meta_status.lower())
-
-                    if not new_status:
-                        print(
-                            "WHATSAPP STATUS: unsupported status:",
-                            meta_status,
-                        )
-                        continue
-
-                    message.status = new_status
-                    print(
-                        f"WHATSAPP STATUS UPDATED "
-                        f"message={message.id} "
-                        f"status={new_status}"
-                    )
-
-                metadata = value.get("metadata", {})
-                phone_number_id = metadata.get("phone_number_id")
-
-                if not phone_number_id:
+                if not provider_message_id or not meta_status:
                     continue
 
-                # Determine which clinic owns this WhatsApp number.
-                channel = db.scalar(
-                    select(WhatsAppChannel).where(
-                        WhatsAppChannel.phone_number_id == phone_number_id,
-                        WhatsAppChannel.is_active == True,
+                message = db.scalar(
+                    select(Message).where(
+                        Message.provider_message_id == provider_message_id
                     )
                 )
 
-                if not channel:
+                if not message:
                     print(
-                        "WHATSAPP: unknown phone_number_id:",
-                        phone_number_id,
+                        "WHATSAPP STATUS: message not found:",
+                        provider_message_id
                     )
                     continue
 
-                contacts = value.get("contacts", [])
-                contact_names = {}
+                status_map = {
+                    "sent": "SENT",
+                    "delivered": "DELIVERED",
+                    "read": "READ",
+                    "failed": "FAILED",
+                }
 
-                for contact in contacts:
-                    wa_id = contact.get("wa_id")
-                    profile = contact.get("profile", {})
-                    if wa_id:
-                        contact_names[wa_id] = profile.get("name")
+                new_status = status_map.get(meta_status.lower())
 
-                messages = value.get("messages", [])
-
-                for incoming in messages:
-                    provider_message_id = incoming.get("id")
-                    wa_contact_id = incoming.get("from")
-
-                    if not provider_message_id or not wa_contact_id:
-                        continue
-
-                    existing_message = db.scalar(
-                        select(Message).where(
-                            Message.provider_message_id == provider_message_id,
-                            Message.clinic_id == channel.clinic_id,
-                        )
-                    )
-
-                    if existing_message:
-                        print(
-                            f"WHATSAPP DUPLICATE IGNORED "
-                            f"message_id={provider_message_id}"
-                        )
-                        continue
-
-                    conversation = db.scalar(
-                        select(Conversation).where(
-                            Conversation.whatsapp_channel_id == channel.id,
-                            Conversation.wa_contact_id == wa_contact_id,
-                            Conversation.clinic_id == channel.clinic_id,
-                        )
-                    )
-
-                    timestamp_raw = incoming.get("timestamp")
-                    provider_timestamp = None
-
-                    if timestamp_raw:
-                        try:
-                            provider_timestamp = datetime.fromtimestamp(
-                                int(timestamp_raw),
-                                tz=timezone.utc,
-                            )
-                        except (ValueError, TypeError):
-                            pass
-
-                    if not conversation:
-                        conversation = Conversation(
-                            clinic_id=channel.clinic_id,
-                            whatsapp_channel_id=channel.id,
-                            wa_contact_id=wa_contact_id,
-                            contact_name=contact_names.get(wa_contact_id),
-                            status="OPEN",
-                            last_message_at=provider_timestamp
-                            or datetime.now(timezone.utc),
-                        )
-                        db.add(conversation)
-                        db.flush()
-                    else:
-                        if contact_names.get(wa_contact_id):
-                            conversation.contact_name = contact_names[wa_contact_id]
-                        conversation.last_message_at = (
-                            provider_timestamp or datetime.now(timezone.utc)
-                        )
-
-                    message_type = incoming.get("type", "unknown")
-                    body = None
-                    action = None
-
-                    if message_type == "text":
-                        body = incoming.get("text", {}).get("body")
-
-                        if body:
-                            normalized = body.strip().upper()
-                            action_map = {
-                                "CONFIRM": "CONFIRM",
-                                "YES": "CONFIRM",
-                                "CANCEL": "CANCEL",
-                                "RESCHEDULE": "RESCHEDULE",
-                            }
-                            action = action_map.get(normalized)
-
-                    if action:
-                        appointment = None
-
-                        patients = db.scalars(
-                            select(Patient).where(
-                                Patient.clinic_id == channel.clinic_id
-                            )
-                        ).all()
-
-                        patient = next(
-                            (
-                                p
-                                for p in patients
-                                if normalize_phone(p.phone)
-                                == normalize_phone(wa_contact_id)
-                            ),
-                            None,
-                        )
-
-                        if patient is not None:
-                            local_now = datetime.now(
-                                ZoneInfo("Asia/Beirut")
-                            ).replace(tzinfo=None)
-
-                            appointment = db.scalar(
-                                select(Appointment)
-                                .where(
-                                    Appointment.clinic_id == channel.clinic_id,
-                                    Appointment.patient_id == patient.id,
-                                    Appointment.start_at > local_now,
-                                    Appointment.status.in_(
-                                        [
-                                            AppointmentStatus.PENDING,
-                                            AppointmentStatus.CONFIRMED,
-                                        ]
-                                    ),
-                                )
-                                .order_by(Appointment.start_at.asc())
-                            )
-
-                        if appointment:
-                            try:
-                                event_type = apply_patient_confirmation_action(
-                                    db=db,
-                                    appointment=appointment,
-                                    action=action,
-                                )
-                                print(
-                                    f"WHATSAPP PATIENT ACTION "
-                                    f"appointment={appointment.id} "
-                                    f"action={action} "
-                                    f"event={event_type}"
-                                )
-                            except ValueError as exc:
-                                print(
-                                    "WHATSAPP PATIENT ACTION ERROR:",
-                                    str(exc),
-                                )
-
-                    message = Message(
-                        clinic_id=channel.clinic_id,
-                        conversation_id=conversation.id,
-                        provider_message_id=provider_message_id,
-                        direction="INBOUND",
-                        message_type=message_type,
-                        body=body,
-                        status="RECEIVED",
-                        provider_timestamp=provider_timestamp,
-                    )
-                    db.add(message)
-
+                if not new_status:
                     print(
-                        f"WHATSAPP STORED clinic={channel.clinic_id} "
-                        f"conversation={conversation.id} "
-                        f"from={wa_contact_id} "
-                        f"type={message_type}"
+                        "WHATSAPP STATUS: unsupported status:",
+                        meta_status
                     )
+                    continue
 
-        db.commit()
+                message.status = new_status
+
+                print(
+                    f"WHATSAPP STATUS UPDATED "
+                    f"message={message.id} "
+                    f"status={new_status}"
+                )
+
+            metadata = value.get("metadata", {})
+            phone_number_id = metadata.get("phone_number_id")
+
+            if not phone_number_id:
+                continue
+
+            # Determine which clinic owns this WhatsApp number
+            channel = db.scalar(
+                select(WhatsAppChannel).where(
+                    WhatsAppChannel.phone_number_id == phone_number_id,
+                    WhatsAppChannel.is_active == True,
+                )
+            )
+
+            if not channel:
+                print(
+                    "WHATSAPP: unknown phone_number_id:",
+                    phone_number_id
+                )
+                continue
+
+            contacts = value.get("contacts", [])
+            contact_names = {}
+
+            for contact in contacts:
+                wa_id = contact.get("wa_id")
+                profile = contact.get("profile", {})
+
+                if wa_id:
+                    contact_names[wa_id] = profile.get("name")
+
+            message_type = incoming.get("type", "unknown")
+body = None
+action = None
+
+if message_type == "text":
+    body = incoming.get("text", {}).get("body")
+
+    if body:
+        normalized = body.strip().upper()
+
+        action_map = {
+            "CONFIRM": "CONFIRM",
+            "YES": "CONFIRM",
+            "CANCEL": "CANCEL",
+            "RESCHEDULE": "RESCHEDULE",
+        }
+
+        action = action_map.get(normalized)
+
+if action:
+    appointment = None
+
+    patients = db.scalars(
+        select(Patient).where(
+            Patient.clinic_id == channel.clinic_id
+        )
+    ).all()
+
+    patient = next(
+        (
+            p
+            for p in patients
+            if normalize_phone(p.phone)
+            == normalize_phone(wa_contact_id)
+        ),
+        None,
+    )
+
+    if patient is not None:
+        appointment = db.scalar(
+            select(Appointment)
+            .where(
+                Appointment.clinic_id == channel.clinic_id,
+                Appointment.patient_id == patient.id,
+                Appointment.status.in_(
+                    [
+                        AppointmentStatus.PENDING,
+                        AppointmentStatus.CONFIRMED,
+                    ]
+                ),
+            )
+            .order_by(Appointment.start_at.asc())
+        )
+
+    if appointment:
+        try:
+            event_type = apply_patient_confirmation_action(
+                db=db,
+                appointment=appointment,
+                action=action,
+            )
+
+            print(
+                f"WHATSAPP PATIENT ACTION "
+                f"appointment={appointment.id} "
+                f"action={action} "
+                f"event={event_type}"
+            )
+
+        except ValueError as exc:
+            print(
+                "WHATSAPP PATIENT ACTION ERROR:",
+                str(exc),
+            )
+
+            message = Message(
+                clinic_id=channel.clinic_id,
+                conversation_id=conversation.id,
+                provider_message_id=provider_message_id,
+                direction="INBOUND",
+                message_type=message_type,
+                body=body,
+                status="RECEIVED",
+                provider_timestamp=provider_timestamp,
+            )
+            db.add(message) 
+            print(
+                    f"WHATSAPP STORED clinic={channel.clinic_id} "
+                    f"conversation={conversation.id} "
+                    f"from={wa_contact_id} "
+                    f"type={message_type}"
+                )
+
+            db.commit()
 
     except Exception as exc:
         db.rollback()
+
         print(
             "WHATSAPP WEBHOOK ERROR:",
             type(exc).__name__,
             str(exc),
         )
         traceback.print_exc()
+
+        # For now expose the failure while testing.
         raise HTTPException(
             status_code=500,
             detail="WhatsApp webhook processing failed",
@@ -1038,15 +984,15 @@ async def whatsapp_send_template(
 @app.post("/whatsapp/send")
 async def whatsapp_send_message(
     data: WhatsAppSendRequest,
-    request: Request,
+    request:Request,
     db: Session = Depends(get_db),
 ):
     clinic_id = int(request.state.user["clinic_id"])
-
-    # 1. Find the WhatsApp channel for this clinic.
+    # 1. Find the WhatsApp channel / clinic
     channel = db.scalar(
         select(WhatsAppChannel).where(
             WhatsAppChannel.phone_number_id == data.phone_number_id,
+            Conversation.wa_contact_id == data.recipient,
             WhatsAppChannel.clinic_id == clinic_id,
             WhatsAppChannel.is_active == True,
         )
@@ -1058,12 +1004,11 @@ async def whatsapp_send_message(
             detail="WhatsApp channel not found",
         )
 
-    # 2. Find or create the conversation for this recipient.
+    # 2. Find or create conversation for recipient
     conversation = db.scalar(
         select(Conversation).where(
             Conversation.whatsapp_channel_id == channel.id,
             Conversation.wa_contact_id == data.recipient,
-            Conversation.clinic_id == clinic_id,
         )
     )
 
@@ -1072,31 +1017,28 @@ async def whatsapp_send_message(
             clinic_id=channel.clinic_id,
             whatsapp_channel_id=channel.id,
             wa_contact_id=data.recipient,
-            contact_name=None,
+            contact_name=contact_names.get(wa_contact_id),
             status="OPEN",
             last_message_at=datetime.now(timezone.utc),
         )
+
         db.add(conversation)
         db.flush()
-
     if not whatsapp_window_is_open(db, conversation.id):
         raise HTTPException(
-            status_code=409,
-            detail=(
-                "WhatsApp 24-hour window is closed. "
-                "Use an approved template message."
-            ),
+        status_code=409,
+        detail="WhatsApp 24-hour window is closed. Use an approved template message.",
         )
 
     try:
-        # 3. Send message through Meta.
+        # 3. Send message through Meta
         result = await send_whatsapp_text(
             phone_number_id=data.phone_number_id,
             recipient=data.recipient,
             message_body=data.message,
         )
 
-        # 4. Extract Meta message ID.
+        # 4. Extract Meta message ID
         messages = result.get("messages", [])
 
         if not messages or not messages[0].get("id"):
@@ -1106,7 +1048,7 @@ async def whatsapp_send_message(
 
         provider_message_id = messages[0]["id"]
 
-        # 5. Store outgoing message.
+        # 5. Store outgoing message
         outbound_message = Message(
             clinic_id=channel.clinic_id,
             conversation_id=conversation.id,
@@ -1119,7 +1061,9 @@ async def whatsapp_send_message(
         )
 
         db.add(outbound_message)
+
         conversation.last_message_at = datetime.now(timezone.utc)
+
         db.commit()
 
         return {
@@ -1131,11 +1075,13 @@ async def whatsapp_send_message(
 
     except Exception as exc:
         db.rollback()
+
         print(
             "WHATSAPP SEND ERROR:",
             type(exc).__name__,
             str(exc),
         )
+
         raise HTTPException(
             status_code=502,
             detail=str(exc),
@@ -1156,6 +1102,27 @@ def list_due_reminders(
         for reminder in reminders
         if reminder["clinic_id"] == clinic_id
     ]
+
+async def whatsapp_send_message(
+    data: WhatsAppSendRequest,
+):
+    try:
+        result = await send_whatsapp_text(
+            phone_number_id=data.phone_number_id,
+            recipient=data.recipient,
+            message_body=data.message,
+        )
+
+        return {
+            "status": "sent",
+            "provider_response": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
 
 @app.get(
     "/whatsapp/conversations",
