@@ -232,8 +232,10 @@ def get_no_response_followups(
 
         # We already handled this no-response case
         if any(
-            event.event_type
-            == "NO_RESPONSE_FOLLOWUP_DUE"
+            event.event_type in {
+                "NO_RESPONSE_FOLLOWUP_SENT",
+                "NO_RESPONSE_FOLLOWUP_FAILED",
+            }
             for event in events
         ):
             continue
@@ -270,6 +272,147 @@ def get_no_response_followups(
                     "No response after 24h reminder",
             }
         )
+
+    return results
+async def send_no_response_followups(
+    db: Session,
+    clinic_id: int,
+) -> list[dict]:
+
+    due_followups = get_no_response_followups(
+        db,
+        clinic_id,
+    )
+
+    results = []
+
+    for item in due_followups:
+
+        appointment = db.get(
+            Appointment,
+            item["appointment_id"],
+        )
+
+        if not appointment:
+            continue
+
+        patient = db.get(
+            Patient,
+            appointment.patient_id,
+        )
+
+        doctor = db.get(
+            Doctor,
+            appointment.doctor_id,
+        )
+
+        clinic = db.get(
+            Clinic,
+            appointment.clinic_id,
+        )
+
+        if not patient or not doctor or not clinic:
+            continue
+
+        channel = db.scalar(
+            select(WhatsAppChannel).where(
+                WhatsAppChannel.clinic_id == clinic_id,
+                WhatsAppChannel.is_active == True,
+            )
+        )
+
+        if not channel:
+            continue
+
+        recipient = normalize_phone(
+            patient.phone
+        )
+
+        parameters = [
+            patient.full_name,
+            doctor.name,
+            appointment.start_at.strftime(
+                "%d %B %Y"
+            ),
+            appointment.start_at.strftime(
+                "%I:%M %p"
+            ),
+            clinic.name,
+        ]
+
+        try:
+            result = await send_whatsapp_template(
+                phone_number_id=channel.phone_number_id,
+                recipient=recipient,
+
+                # Reuse the already-approved
+                # 24h appointment reminder template
+                template_name="appointment_reminder_24h",
+
+                parameters=parameters,
+                language_code="en_US",
+            )
+
+            provider_message_id = None
+
+            messages = result.get(
+                "messages",
+                [],
+            )
+
+            if messages:
+                provider_message_id = (
+                    messages[0].get("id")
+                )
+
+            db.add(
+                AppointmentEvent(
+                    appointment_id=appointment.id,
+                    event_type="NO_RESPONSE_FOLLOWUP_SENT",
+                    details=(
+                        "WhatsApp follow-up sent; "
+                        f"provider_message_id="
+                        f"{provider_message_id or 'unknown'}"
+                    ),
+                )
+            )
+
+            db.commit()
+
+            results.append(
+                {
+                    "appointment_id":
+                        appointment.id,
+                    "status": "sent",
+                    "provider_message_id":
+                        provider_message_id,
+                }
+            )
+
+        except Exception as exc:
+            db.rollback()
+
+            db.add(
+                AppointmentEvent(
+                    appointment_id=appointment.id,
+                    event_type="NO_RESPONSE_FOLLOWUP_FAILED",
+                    details=(
+                        f"{type(exc).__name__}: "
+                        f"{str(exc)}"
+                    ),
+                )
+            )
+
+            db.commit()
+
+            results.append(
+                {
+                    "appointment_id":
+                        appointment.id,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
 
     return results
 
@@ -1090,6 +1233,20 @@ async def whatsapp_webhook_receive(
 
     return {"status": "ok"}
 
+@app.post("/reminders/send-no-response-followups")
+async def send_no_response_followups_endpoint(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    clinic_id = int(
+        request.state.user["clinic_id"]
+    )
+
+    return await send_no_response_followups(
+        db,
+        clinic_id,
+    )
+    
 @app.post("/whatsapp/send-template")
 async def whatsapp_send_template(
     data: WhatsAppTemplateSendRequest,
