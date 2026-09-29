@@ -44,7 +44,6 @@ export default function Home(){
  if(!authReady)return <main className="shell"><div className="authCard"><h2>Clinic Front Desk</h2><p>Loading secure workspace…</p></div></main>;
  if(!token||!user)return <AuthScreen setupRequired={setupRequired} onAuth={loggedIn} setError={setError} error={error}/>;
  const counts=summary?.counts||{};
- const reminders=summary?.reminders||{};
  async function action(id,name){setError('');try{await patch(`/appointments/${id}/${name}`);setSelected(null);setRefresh(x=>x+1)}catch(e){setError(e.message)}}
  return <main className="shell">
    <header className="topbar"><div><div className="eyebrow">SPRINT 4.5C · SECURITY + DEPLOYMENT GATE</div><h1>Clinic Front Desk</h1><p>Appointment operations dashboard</p></div><div className="topActions"><span className="userChip">{user.full_name} · {user.role}</span><button onClick={logout}>Log out</button><button onClick={()=>setShowOps(true)}>Operational dashboard</button>{user.role==='OWNER'&&<><button onClick={()=>setShowAdmin(true)}>Administration</button><button onClick={()=>setShowUsers(true)}>Users & roles</button><button onClick={()=>setShowAudit(true)}>Audit log</button></>}{user.role!=='DOCTOR'&&<><button onClick={()=>setShowWaiting(true)}>Waiting list</button><button className="primary" onClick={()=>setShowBook(true)}>+ New appointment</button></>}</div></header>
@@ -56,16 +55,6 @@ export default function Home(){
    </section>
    <section className="stats">
     <Stat label="Appointments" value={summary?.total??0}/><Stat label="High risk" value={summary?.risk_counts?.HIGH||0}/><Stat label="Pending" value={counts.PENDING||0}/><Stat label="Completed" value={counts.COMPLETED||0}/>
-   </section>
-   <section className="stats">
-    <Stat label="48h reminders sent" value={reminders.REMINDER_48H_SENT||0}/>
-    <Stat label="24h reminders sent" value={reminders.REMINDER_24H_SENT||0}/>
-    <Stat label="Reminder failures" value={reminders.REMINDER_FAILED||0}/>
-    <Stat label="Patient confirmed" value={reminders.PATIENT_CONFIRMED||0}/>
-    <Stat label="Patient cancelled" value={reminders.PATIENT_CANCELLED||0}/>
-    <Stat label="Reschedule requests" value={reminders.RESCHEDULE_REQUESTED||0}/>
-    <Stat label="Follow-ups sent" value={reminders.NO_RESPONSE_FOLLOWUP_SENT||0}/>
-    <Stat label="Follow-up failures" value={reminders.NO_RESPONSE_FOLLOWUP_FAILED||0}/>
    </section>
    <section className="grid">
     <div className="panel"><div className="panelHead"><h2>Schedule</h2><span>{day}</span></div>
