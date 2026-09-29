@@ -146,6 +146,14 @@ def get_upcoming_reminders(
     results = []
 
     for appointment in appointments:
+        risk = calculate_appointment_risk(
+        db,
+        appointment,
+        persist=False,
+        )
+
+        risk_score = risk["score"]
+        risk_level = risk["level"]
         events = db.scalars(
             select(AppointmentEvent).where(
                 AppointmentEvent.appointment_id == appointment.id
@@ -162,6 +170,9 @@ def get_upcoming_reminders(
             existing_event_types,
             now,
         )
+        if reminder_type == "REMINDER_48H":
+            if risk_level == "LOW":
+                reminder_type = None
 
         if reminder_type:
             results.append(
@@ -173,6 +184,8 @@ def get_upcoming_reminders(
                     "start_at": appointment.start_at,
                     "status": appointment.status.value,
                     "reminder_type": reminder_type,
+                    "risk_score": risk_score,
+                    "risk_level": risk_level,
                 }
             )
 
