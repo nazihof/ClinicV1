@@ -1944,8 +1944,36 @@ def dashboard_summary(clinic_id:int, day:date, doctor_id:int|None=None, db:Sessi
             risks[a.id]=r
             risk_counts[r["level"]]+=1
     queue=build_attention_queue(db, clinic_id, day, doctor_id=doctor_id)
+    appointment_ids = [a.id for a in appts]
+
+    reminder_counts = {
+                "REMINDER_48H_SENT": 0,
+                "REMINDER_24H_SENT": 0,
+                "REMINDER_FAILED": 0,
+                "PATIENT_CONFIRMED": 0,
+                "PATIENT_CANCELLED": 0,
+                "RESCHEDULE_REQUESTED": 0,
+                "NO_RESPONSE_FOLLOWUP_SENT": 0,
+                "NO_RESPONSE_FOLLOWUP_FAILED": 0,
+            }
+
+    if appointment_ids:
+            reminder_events = db.scalars(
+                select(AppointmentEvent).where(
+                    AppointmentEvent.appointment_id.in_(
+                        appointment_ids
+                    ),
+                    AppointmentEvent.event_type.in_(
+                        reminder_counts.keys()
+                    ),
+                )
+            ).all()
+
+    for event_item in reminder_events:
+        if event_item.event_type in reminder_counts:
+            reminder_counts[event_item.event_type] += 1
     db.commit()
-    return {"total":len(appts),"counts":counts,"risk_counts":risk_counts,"attention":queue["items"][:12],"attention_counts":queue["counts"]}
+    return {"total":len(appts),"counts":counts,"risk_counts":risk_counts,"attention":queue["items"][:12],"attention_counts":queue["counts"],"reminders": reminder_counts,}
 
 
 @app.post("/appointments/{appointment_id}/patient-response")
