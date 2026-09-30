@@ -1991,6 +1991,13 @@ def find_eligible_waiting_list_entries(
             continue
 
         eligible.append(entry)
+        eligible.sort(
+        key=lambda entry: (
+            -(entry.priority or 0),
+            entry.created_at,
+            entry.id,
+        )
+    )
 
     return eligible
 @app.get("/appointments/{appointment_id}/recovery-candidates")
@@ -2018,6 +2025,7 @@ def recovery_candidates(
         "candidate_count": len(entries),
         "candidates": [
             {
+                "rank": index,
                 "waiting_list_id": entry.id,
                 "patient_id": entry.patient_id,
                 "patient_name": entry.patient.full_name,
@@ -2025,8 +2033,9 @@ def recovery_candidates(
                 "preferred_day": entry.preferred_day,
                 "earliest_time": entry.earliest_time,
                 "latest_time": entry.latest_time,
+                "created_at": entry.created_at,
             }
-            for entry in entries
+            for index, entry in enumerate(entries, start=1)
         ],
     }
 
