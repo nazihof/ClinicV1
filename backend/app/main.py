@@ -777,8 +777,19 @@ def apply_patient_confirmation_action(
         event_type = "PATIENT_CONFIRMED"
 
     elif action == "CANCEL":
+        old_start = appointment.start_at
+        old_end = appointment.end_at
+
         appointment.status = AppointmentStatus.CANCELLED
         event_type = "PATIENT_CANCELLED"
+
+        record_freed_slot(
+            db=db,
+            appointment=appointment,
+            start_at=old_start,
+            end_at=old_end,
+            reason="PATIENT_CANCELLED",
+        )
 
     elif action == "RESCHEDULE":
         event_type = "RESCHEDULE_REQUESTED"
@@ -1815,10 +1826,51 @@ def no_show(appointment_id:int, db:Session=Depends(get_db)):
     if not a: raise HTTPException(404,"Appointment not found")
     return transition(db,a,AppointmentStatus.NO_SHOW,"NO_SHOW")
 @app.patch("/appointments/{appointment_id}/cancel", response_model=AppointmentOut)
-def cancel(appointment_id:int, db:Session=Depends(get_db)):
-    a=db.get(Appointment,appointment_id)
-    if not a: raise HTTPException(404,"Appointment not found")
-    return transition(db,a,AppointmentStatus.CANCELLED,"CANCELLED")
+def cancel(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+):
+    a = db.get(Appointment, appointment_id)
+
+    if not a:
+        raise HTTPException(
+            404,
+            "Appointment not found",
+        )
+
+    if a.status == AppointmentStatus.CANCELLED:
+        raise HTTPException(
+            409,
+            "Appointment is already cancelled",
+        )
+
+    old_start = a.start_at
+    old_end = a.end_at
+
+    a.status = AppointmentStatus.CANCELLED
+
+    event(
+        db,
+        a.id,
+        "CANCELLED",
+    )
+
+    record_freed_slot(
+        db=db,
+        appointment=a,
+        start_at=old_start,
+        end_at=old_end,
+        reason="APPOINTMENT_CANCELLED",
+    )
+
+    db.commit()
+    db.refresh(a)
+
+    return a
+# def cancel(appointment_id:int, db:Session=Depends(get_db)):
+#     a=db.get(Appointment,appointment_id)
+#     if not a: raise HTTPException(404,"Appointment not found")
+#     return transition(db,a,AppointmentStatus.CANCELLED,"CANCELLED")
 @app.patch("/appointments/{appointment_id}/reschedule", response_model=AppointmentOut)
 def reschedule(appointment_id:int, body:AppointmentReschedule, db:Session=Depends(get_db)):
     a=db.get(Appointment,appointment_id)
@@ -1826,9 +1878,17 @@ def reschedule(appointment_id:int, body:AppointmentReschedule, db:Session=Depend
     service=db.get(Service,a.service_id); end=calculate_end(body.start_at,service.duration_minutes)
     ensure_in_schedule(db,a.clinic_id,a.doctor_id,body.start_at,end)
     ensure_no_overlap(db,a.clinic_id,a.doctor_id,body.start_at,end,exclude_id=a.id)
-    old=a.start_at; a.start_at=body.start_at; a.end_at=end; a.status=AppointmentStatus.PENDING
-    event(db,a.id,"RESCHEDULED",f"{old.isoformat()} -> {body.start_at.isoformat()}")
-    db.commit(); db.refresh(a); return a
+    old_start = a.start_at
+    old_end = a.end_at
+
+    a.start_at = body.start_at
+    a.end_at = end
+    a.status = AppointmentStatus.PENDING
+
+    event(db,a.id,"RESCHEDULED",f"{old_start.isoformat()} -> {body.start_at.isoformat()}",)
+    record_freed_slot(db=db,appointment=a,start_at=old_start,end_at=old_end,reason="APPOINTMENT_RESCHEDULED",)
+    db.commit();db.refresh(a)
+    return a
 
 @app.get("/appointments/{appointment_id}/risk", response_model=RiskOut)
 def appointment_risk(appointment_id:int, db:Session=Depends(get_db)):
@@ -1851,6 +1911,29 @@ def recalculate_risk(clinic_id:int, db:Session=Depends(get_db)):
 @app.get("/appointments/{appointment_id}/events", response_model=list[EventOut])
 def events(appointment_id:int, db:Session=Depends(get_db)):
     return db.scalars(select(AppointmentEvent).where(AppointmentEvent.appointment_id==appointment_id).order_by(AppointmentEvent.created_at)).all()
+
+def record_freed_slot(
+    db: Session,
+    appointment: Appointment,
+    start_at: datetime,
+    end_at: datetime,
+    reason: str,
+):
+    details = (
+        f"reason={reason}; "
+        f"clinic_id={appointment.clinic_id}; "
+        f"doctor_id={appointment.doctor_id}; "
+        f"service_id={appointment.service_id}; "
+        f"start_at={start_at.isoformat()}; "
+        f"end_at={end_at.isoformat()}"
+    )
+
+    event(
+        db,
+        appointment.id,
+        "SLOT_FREED",
+        details,
+    )
 
 
 
