@@ -1961,6 +1961,75 @@ def add_waiting_list(body: WaitingListCreate, request:Request, db:Session=Depend
     obj=WaitingListEntry(**body.model_dump(), status="ACTIVE")
     db.add(obj); db.commit(); db.refresh(obj); return waiting_view(obj)
 
+def find_eligible_waiting_list_entries(
+    db: Session,
+    appointment: Appointment,
+    freed_start_at: datetime,
+):
+    stmt = select(WaitingListEntry).where(
+        WaitingListEntry.clinic_id == appointment.clinic_id,
+        WaitingListEntry.doctor_id == appointment.doctor_id,
+        WaitingListEntry.service_id == appointment.service_id,
+        WaitingListEntry.status == "ACTIVE",
+    )
+
+    entries = list(db.scalars(stmt).all())
+
+    eligible = []
+
+    for entry in entries:
+        slot_day = freed_start_at.date()
+        slot_time = freed_start_at.time()
+
+        if entry.preferred_day and entry.preferred_day != slot_day:
+            continue
+
+        if entry.earliest_time and slot_time < entry.earliest_time:
+            continue
+
+        if entry.latest_time and slot_time > entry.latest_time:
+            continue
+
+        eligible.append(entry)
+
+    return eligible
+@app.get("/appointments/{appointment_id}/recovery-candidates")
+def recovery_candidates(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+):
+    appointment = db.get(Appointment, appointment_id)
+
+    if not appointment:
+        raise HTTPException(
+            404,
+            "Appointment not found",
+        )
+
+    entries = find_eligible_waiting_list_entries(
+        db=db,
+        appointment=appointment,
+        freed_start_at=appointment.start_at,
+    )
+
+    return {
+        "appointment_id": appointment.id,
+        "slot_start_at": appointment.start_at,
+        "candidate_count": len(entries),
+        "candidates": [
+            {
+                "waiting_list_id": entry.id,
+                "patient_id": entry.patient_id,
+                "patient_name": entry.patient.full_name,
+                "priority": entry.priority,
+                "preferred_day": entry.preferred_day,
+                "earliest_time": entry.earliest_time,
+                "latest_time": entry.latest_time,
+            }
+            for entry in entries
+        ],
+    }
+
 @app.get("/waiting-list", response_model=list[WaitingListView])
 def list_waiting_list(clinic_id:int, doctor_id:int|None=None, status:str="ACTIVE", db:Session=Depends(get_db)):
     stmt=select(WaitingListEntry).where(WaitingListEntry.clinic_id==clinic_id)
