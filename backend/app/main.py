@@ -1935,7 +1935,22 @@ def record_freed_slot(
         details,
     )
 
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
+app = FastAPI()
+
+# Mount static files folder (optional, for CSS/images)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/privacy", response_class=FileResponse)
+def get_privacy_policy():
+    return FileResponse("static/privacy.html")
+
+@app.get("/data-deletion", response_class=FileResponse)
+def get_data_deletion():
+    return FileResponse("static/data-deletion.html")
 
 def waiting_view(x: WaitingListEntry):
     return WaitingListView(
